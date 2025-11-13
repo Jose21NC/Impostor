@@ -7,7 +7,7 @@
 
 # Monorepo: aseguramos que Netlify ejecute en la raíz del repo
 [build.environment]
-  NODE_VERSION = "18"
+  NODE_VERSION = "22"
   NPM_FLAGS = "--legacy-peer-deps"
   # Variables de ejemplo (usar el UI de Netlify para valores reales)
   VITE_SERVER_URL = "https://tu-backend.example.com" # URL del servidor Socket.io externo
