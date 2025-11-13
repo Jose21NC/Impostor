@@ -1,0 +1,44 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  height: 100%;
+}
+
+/* App visuals */
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.gradient-blob {
+  background: radial-gradient(circle at 20% 20%, rgba(99,102,241,0.12), transparent 20%), radial-gradient(circle at 80% 80%, rgba(56,189,248,0.08), transparent 25%);
+}
+
+/* Chat-like bubbles */
+.bubble {
+  max-width: 78%;
+  padding: 0.5rem 0.75rem;
+  border-radius: 1rem;
+}
+
+/* Safe area for iOS bottom bar */
+:root {
+  --safe-area-inset-bottom: env(safe-area-inset-bottom);
+}
+.pb-safe {
+  padding-bottom: calc(12px + var(--safe-area-inset-bottom));
+}
+
+/* Dark mode helpers */
+.dark-body {
+  background: linear-gradient(180deg, #0f172a, #020617);
+  color: #e6eef8;
+}
+
+/* Make buttons easier to tap on mobile */
+button { touch-action: manipulation; }
+
+/* small helper to keep messages scrolled */
+#messages { scroll-behavior: smooth; }

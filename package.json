@@ -1,0 +1,14 @@
+{
+  "name": "impostor-monorepo",
+  "private": true,
+  "version": "0.0.0",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:server": "npm --workspace=@impostor/server run dev",
+    "dev:client": "npm --workspace=@impostor/client run dev",
+    "dev": "npm run dev:server & npm run dev:client",
+    "build": "npm --workspace=@impostor/shared run build && npm --workspace=@impostor/server run build && npm --workspace=@impostor/client run build"
+  }
+}
