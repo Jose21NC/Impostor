@@ -5,6 +5,9 @@ import { wordPairs } from '@impostor/shared';
 
 const socket = io(import.meta.env.VITE_SERVER_URL ?? 'http://localhost:4000');
 
+// Estado de conexión (visual debugging en producción)
+
+
 function Avatar({ name }: { name: string }) {
   return (
     <div className="w-12 h-12 rounded-full bg-gradient-to-br from-sky-500 to-indigo-600 text-white flex items-center justify-center font-semibold">{name.charAt(0).toUpperCase()}</div>
@@ -12,6 +15,17 @@ function Avatar({ name }: { name: string }) {
 }
 
 export default function App() {
+  const [connected, setConnected] = useState(socket.connected);
+  useEffect(() => {
+    const onConnect = () => setConnected(true);
+    const onDisconnect = () => setConnected(false);
+    socket.on('connect', onConnect);
+    socket.on('disconnect', onDisconnect);
+    return () => {
+      socket.off('connect', onConnect);
+      socket.off('disconnect', onDisconnect);
+    };
+  }, []);
   const [name, setName] = useState('');
   const [room, setRoom] = useState('');
   const [roomId, setRoomId] = useState<string | null>(null);
@@ -995,6 +1009,11 @@ export default function App() {
 
   return (
   <div className={`min-h-screen p-4 ${darkMode ? 'dark-body' : 'bg-gradient-to-b from-slate-50 to-slate-100'}`}>
+        {/* Indicador de conexión backend */}
+        <div className="fixed top-2 right-2 z-50 text-xs flex items-center gap-1 px-2 py-1 rounded-full shadow bg-white/80 backdrop-blur dark:bg-slate-800/80">
+          <span className={`inline-block h-2.5 w-2.5 rounded-full ${connected ? 'bg-emerald-500' : 'bg-rose-500 animate-pulse'}`}></span>
+          <span className="font-medium select-none">{connected ? 'Conectado' : 'Desconectado'}</span>
+        </div>
         <main className="space-y-4">
           {/* Voting reveal countdown overlay */}
           {typeof revealCountdown === 'number' && revealCountdown > 0 && (

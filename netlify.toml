@@ -10,7 +10,7 @@
   NODE_VERSION = "22"
   NPM_FLAGS = "--legacy-peer-deps"
   # Variables de ejemplo (usar el UI de Netlify para valores reales)
-  VITE_SERVER_URL = "https://tu-backend.example.com" # URL del servidor Socket.io externo
+  VITE_SERVER_URL = "https://impostor-7iz7.onrender.com" # URL del servidor Socket.io externo (producción)
   VITE_YT_AMBIENT_VIDEO_ID = ""       # ID de YouTube para música ambiente opcional
   VITE_YT_DRUM_ID = ""                # ID para sonido de cuenta regresiva
   VITE_YT_APPLAUSE_ID = ""            # ID para aplausos
