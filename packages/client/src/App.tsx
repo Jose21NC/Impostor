@@ -1,7 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 import type { GameState, Player, Role } from '@impostor/shared';
-import { wordCategories, type WordCategory } from '@impostor/shared';
+import { wordPairs } from '@impostor/shared';
 
 const socket = io(import.meta.env.VITE_SERVER_URL ?? 'http://localhost:4000');
 
@@ -24,19 +24,18 @@ export default function App() {
   const [revealedRole, setRevealedRole] = useState<Role | null>(null);
   const [revealedLocation, setRevealedLocation] = useState<string | null>(null);
   const ROLE_EMOJI: Record<Role, string> = { CREWMATE: '🕵️‍♂️', IMPOSTOR: '🟥' };
+  // ID de video de YouTube para música ambiente (opcional)
+  const ytVideoId = (import.meta as any).env?.VITE_YT_AMBIENT_VIDEO_ID as string | undefined;
 
   // Settings states
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
-  const [categoryModalOpen, setCategoryModalOpen] = useState(false);
+  // Modal de categorías eliminado (sistema unificado de wordPairs)
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const [localImpostorCount, setLocalImpostorCount] = useState(1);
   const [localTurnTime, setLocalTurnTime] = useState(20);
   const [localVoteTime, setLocalVoteTime] = useState(30);
   const [localDiscussionTime, setLocalDiscussionTime] = useState(20);
-  // Selección única legacy y multi-categoría nuevas
-  const [localCategory, setLocalCategory] = useState('Alimentos'); // compatibilidad
-  const [localCategories, setLocalCategories] = useState<string[]>(['Alimentos']);
-  const allCategoryKeys = Object.keys(wordCategories);
+  const [localHiddenImpostor, setLocalHiddenImpostor] = useState(false);
 
   // Sync local settings with state
   useEffect(() => {
@@ -45,14 +44,7 @@ export default function App() {
       setLocalTurnTime(state.settings.turnTimeSeconds ?? 20);
   setLocalVoteTime(state.settings.voteTimeSeconds ?? 30);
   setLocalDiscussionTime(state.settings.discussionTimeSeconds ?? 20);
-      // Sincronizar categorías: si existe arreglo usarlo; si no, usar category legacy
-      if (state.settings.categories && state.settings.categories.length > 0) {
-        setLocalCategories(state.settings.categories);
-        setLocalCategory(state.settings.categories[0]);
-      } else {
-        setLocalCategory(state.settings.category ?? 'Alimentos');
-        setLocalCategories([state.settings.category ?? 'Alimentos']);
-      }
+      setLocalHiddenImpostor(state.settings.hiddenImpostor ?? false);
     }
   }, [state?.settings]);
 
@@ -105,7 +97,8 @@ export default function App() {
       const me = s.players.find((p: Player) => p.socketId === socket.id);
       if (me) setLocalId(me.id);
       setLogs([ 'Te uniste a la sala' ]);
-      setJoinConfirmOpen(true);
+      // Mostrar modal de unión solo si NO eres el dueño (cuando creas la sala el server emite también JOINED_ROOM)
+      if (!me || s.ownerId !== me.id) setJoinConfirmOpen(true);
       setState(s);
       setRoomId(s.roomId);
     });
@@ -123,6 +116,14 @@ export default function App() {
         // Cerrar modal de poll en cualquier fase activa distinta a ROUND_END
         if (s.phase === 'VOTING' || s.phase === 'IN_GAME' || s.phase === 'DISCUSSION') {
           setPollOpen(false);
+        }
+  // Ambient background: mantener en IN_GAME, VOTING, DISCUSSION y ROUND_END para continuidad
+  const ambientPhases = ['IN_GAME', 'VOTING', 'DISCUSSION', 'ROUND_END'];
+        if (ambientPhases.includes(s.phase)) {
+          // Iniciar ambient (YouTube o fallback local)
+          startAmbient();
+        } else {
+          stopAmbient();
         }
         // Si volvemos a LOBBY por nueva sala, limpiar chat y votos (seguro adicional)
         if (s.phase === 'LOBBY') {
@@ -146,14 +147,12 @@ export default function App() {
           setCurrentTurn(null);
         }
     });
-    socket.on('PRIVATE_LOCATION', (loc) => {
-      // palabra secreta enviada solo a civiles
-      setSecretLocation(loc);
-      secretLocationRef.current = loc;
-      // si el modal está abierto y aún no hay palabra, setearla
-      setRevealedLocation((prev) => prev ?? loc);
-      setLogs((l) => [...l, `Recibiste la palabra secreta`]);
-      console.debug('[PRIVATE_LOCATION]', loc);
+    socket.on('PRIVATE_LOCATION', (loc, cat) => {
+      setSecretLocation(loc || null);
+      setSecretCategory(cat || null);
+      secretLocationRef.current = loc || null;
+      if (loc) setRevealedLocation((prev) => prev ?? loc);
+      setLogs((l) => [...l, `Recibiste info de categoría/palabra`]);
     });
     socket.on('PLAYER_INFO', (playerId: string, role?: Role | null, location?: string | null) => {
       // Evento llega solo al socket dueño; aceptar sin comparar playerId
@@ -191,12 +190,43 @@ export default function App() {
       setPollOpen(false);
       setHasVoted(false);
       setVoteSelection(null);
+      setPendingVoteResult(null);
       setLogs((l) => [...l, 'Fase de votación iniciada']);
     });
     socket.on('VOTE_RESULT', (eliminatedId) => {
+      // Si hay cuenta regresiva activa, diferir el resultado para mostrarla completa
+      if (typeof revealCountdown === 'number' && revealCountdown > 0) {
+        setPendingVoteResult(eliminatedId);
+        return;
+      }
+      if (countdownRef.current) { window.clearInterval(countdownRef.current); countdownRef.current = null; }
+      setRevealCountdown(null);
       setVoteResult(eliminatedId);
-      playVoteResultSound(!!eliminatedId);
+      playApplause();
       setLogs((l) => [...l, `Resultado de votación: ${eliminatedId ?? 'Nadie eliminado'}`]);
+    });
+    socket.on('VOTING_COMPLETE', (seconds) => {
+      setRevealCountdown(seconds);
+      if (countdownRef.current) { window.clearInterval(countdownRef.current); }
+      countdownRef.current = window.setInterval(() => {
+        setRevealCountdown((prev) => {
+          if (!prev || prev <= 1) {
+            if (countdownRef.current) { window.clearInterval(countdownRef.current); countdownRef.current = null; }
+            // aplicar resultado pendiente si existe
+            if (pendingVoteResult !== null) {
+              setVoteResult(pendingVoteResult);
+              playApplause();
+              setLogs((l) => [...l, `Resultado de votación: ${pendingVoteResult ?? 'Nadie eliminado'}`]);
+              setPendingVoteResult(null);
+            }
+            return 0;
+          }
+          playDrumTick();
+          return prev - 1;
+        });
+      }, 1000);
+      // immediate drum on start
+      playDrumTick();
     });
     socket.on('VOTE_PROGRESS', (votes) => {
       setVoteProgress(Array.isArray(votes) ? votes : []);
@@ -230,6 +260,8 @@ export default function App() {
     };
   }, []);
 
+  
+
   // client-side runtime state for in-game
   const [currentTurn, setCurrentTurn] = useState<string | null>(null);
   const [submittedWords, setSubmittedWords] = useState<Array<{ playerId: string; word: string }>>([]);
@@ -243,6 +275,34 @@ export default function App() {
   const [confirmVote, setConfirmVote] = useState(false);
   const [voteProgress, setVoteProgress] = useState<Array<{ voterId: string; targetId: string | null }>>([]);
   const [voteIntents, setVoteIntents] = useState<Array<{ voterId: string; targetId: string | null }>>([]);
+  // Fallback: si detectamos localmente que todos los vivos ya emitieron su voto, iniciamos la cuenta regresiva
+  useEffect(() => {
+    if (!state || state.phase !== 'VOTING') return;
+    if (revealCountdown && revealCountdown > 0) return;
+    const alive = state.players.filter((p: Player) => p.alive).length;
+    const voters = new Set(voteProgress.map(v => v.voterId));
+    if (alive > 0 && voters.size >= alive) {
+      setRevealCountdown(5);
+      if (countdownRef.current) { window.clearInterval(countdownRef.current); }
+      countdownRef.current = window.setInterval(() => {
+        setRevealCountdown((prev) => {
+          if (!prev || prev <= 1) {
+            if (countdownRef.current) { window.clearInterval(countdownRef.current); countdownRef.current = null; }
+            if (pendingVoteResult !== null) {
+              setVoteResult(pendingVoteResult);
+              playApplause();
+              setLogs((l) => [...l, `Resultado de votación: ${pendingVoteResult ?? 'Nadie eliminado'}`]);
+              setPendingVoteResult(null);
+            }
+            return 0;
+          }
+          playDrumTick();
+          return prev - 1;
+        });
+      }, 1000);
+      playDrumTick();
+    }
+  }, [voteProgress, state?.phase]);
   // Poll modal state (round-end decision)
   const [pollOpen, setPollOpen] = useState(false);
   const [pollStartVotes, setPollStartVotes] = useState(0);
@@ -251,9 +311,150 @@ export default function App() {
   const [pollVotes, setPollVotes] = useState<Array<{ playerId: string; choice: 'START' | 'DISCUSS' }>>([]);
   const [createConfirmOpen, setCreateConfirmOpen] = useState(false);
   const [joinConfirmOpen, setJoinConfirmOpen] = useState(false);
+  const [copyToast, setCopyToast] = useState<string | null>(null);
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  const [ytUnmute, setYtUnmute] = useState(false);
+  const [sfxVolume, setSfxVolume] = useState(80); // 0-100
+  const [revealCountdown, setRevealCountdown] = useState<number | null>(null);
+  const [pendingVoteResult, setPendingVoteResult] = useState<string | null>(null);
+  const countdownRef = useRef<number | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null as any);
+  const ambientGainRef = useRef<GainNode | null>(null);
+  const ambientOscRef = useRef<OscillatorNode | null>(null);
+  const ambientLFORef = useRef<OscillatorNode | null>(null);
+  const ambientTagRef = useRef<HTMLAudioElement | null>(null);
+  const drumTagRef = useRef<HTMLAudioElement | null>(null);
+  const applauseTagRef = useRef<HTMLAudioElement | null>(null);
+  const roleRevealTagRef = useRef<HTMLAudioElement | null>(null);
+  const roleRevealCivilTagRef = useRef<HTMLAudioElement | null>(null);
+  const roleRevealImpostorTagRef = useRef<HTMLAudioElement | null>(null);
+  // IDs YouTube opcionales para efectos
+  const ytIds = {
+    drum: (import.meta as any).env?.VITE_YT_DRUM_ID as string | undefined,
+    applause: (import.meta as any).env?.VITE_YT_APPLAUSE_ID as string | undefined,
+    civil: (import.meta as any).env?.VITE_YT_ROLE_REVEAL_CIVIL_ID as string | undefined,
+    impostor: (import.meta as any).env?.VITE_YT_ROLE_REVEAL_IMPOSTOR_ID as string | undefined,
+    ambient: (import.meta as any).env?.VITE_YT_AMBIENT_VIDEO_ID as string | undefined,
+  };
+  const ytPlayersRef = useRef<Record<string, any>>({});
+  const ytApiReadyRef = useRef(false);
+
+  useEffect(() => {
+    // Preferir audios en línea provistos por variables de entorno Vite
+    // VITE_SOUND_AMBIENT_URL, VITE_SOUND_DRUM_URL, VITE_SOUND_APPLAUSE_URL
+    try {
+      const aUrl = (import.meta as any).env?.VITE_SOUND_AMBIENT_URL as string | undefined;
+      if (aUrl) {
+        ambientTagRef.current = new Audio(aUrl);
+        ambientTagRef.current.loop = true;
+        ambientTagRef.current.volume = 0.08;
+      }
+    } catch {}
+    try {
+      const dUrl = (import.meta as any).env?.VITE_SOUND_DRUM_URL as string | undefined;
+      if (dUrl) {
+        drumTagRef.current = new Audio(dUrl);
+        drumTagRef.current.volume = 0.3;
+      }
+    } catch {}
+    try {
+      const pUrl = (import.meta as any).env?.VITE_SOUND_APPLAUSE_URL as string | undefined;
+      if (pUrl) {
+        applauseTagRef.current = new Audio(pUrl);
+        applauseTagRef.current.volume = 0.25;
+      }
+    } catch {}
+    try {
+      const rUrl = (import.meta as any).env?.VITE_SOUND_ROLE_REVEAL_URL as string | undefined;
+      if (rUrl) {
+        roleRevealTagRef.current = new Audio(rUrl);
+        roleRevealTagRef.current.volume = 0.4;
+      }
+    } catch {}
+    try {
+      const rcUrl = (import.meta as any).env?.VITE_SOUND_ROLE_REVEAL_CIVIL_URL as string | undefined;
+      if (rcUrl) {
+        roleRevealCivilTagRef.current = new Audio(rcUrl);
+        roleRevealCivilTagRef.current.volume = 0.5;
+      }
+    } catch {}
+    try {
+      const riUrl = (import.meta as any).env?.VITE_SOUND_ROLE_REVEAL_IMPOSTOR_URL as string | undefined;
+      if (riUrl) {
+        roleRevealImpostorTagRef.current = new Audio(riUrl);
+        roleRevealImpostorTagRef.current.volume = 0.5;
+      }
+    } catch {}
+  // Cargar API YouTube si hay IDs configurados (incluye ambient)
+    const anySfx = Object.values(ytIds).some(Boolean);
+    if (anySfx) {
+      if (!(window as any).YT) {
+        const tag = document.createElement('script');
+        tag.src = 'https://www.youtube.com/iframe_api';
+        document.body.appendChild(tag);
+        (window as any).onYouTubeIframeAPIReady = () => {
+          ytApiReadyRef.current = true;
+          Object.entries(ytIds).forEach(([k, vid]) => {
+            if (!vid) return;
+            const elId = `yt-sfx-${k}`;
+            if (!document.getElementById(elId)) {
+              const div = document.createElement('div'); div.id = elId; div.style.display = 'none'; document.body.appendChild(div);
+            }
+            try {
+              ytPlayersRef.current[k] = new (window as any).YT.Player(elId, { videoId: vid, playerVars: { autoplay: 0, controls: 0, modestbranding: 1, rel: 0, loop: k === 'ambient' ? 1 : 0, playlist: k === 'ambient' ? vid : undefined }, events: { onReady: () => { try { ytPlayersRef.current[k].setVolume(sfxVolume); } catch {} } } });
+            } catch {}
+          });
+        };
+      } else {
+        ytApiReadyRef.current = true;
+        Object.entries(ytIds).forEach(([k, vid]) => {
+          if (!vid) return;
+          const elId = `yt-sfx-${k}`;
+          if (!document.getElementById(elId)) {
+            const div = document.createElement('div'); div.id = elId; div.style.display = 'none'; document.body.appendChild(div);
+          }
+          try {
+            ytPlayersRef.current[k] = new (window as any).YT.Player(elId, { videoId: vid, playerVars: { autoplay: 0, controls: 0, modestbranding: 1, rel: 0, loop: k === 'ambient' ? 1 : 0, playlist: k === 'ambient' ? vid : undefined }, events: { onReady: () => { try { ytPlayersRef.current[k].setVolume(sfxVolume); } catch {} } } });
+          } catch {}
+        });
+      }
+    }
+  }, []);
+  // Aplicar volumen a players YouTube cuando cambia
+  useEffect(() => {
+    Object.values(ytPlayersRef.current).forEach((p: any) => {
+      try { p.setVolume?.(sfxVolume); } catch {}
+    });
+    // Ajustar volumen de etiquetas HTMLAudio en función del porcentaje (manteniendo volumen base)
+    const scale = sfxVolume / 100;
+    if (ambientTagRef.current) ambientTagRef.current.volume = 0.08 * scale;
+    if (drumTagRef.current) drumTagRef.current.volume = 0.3 * scale;
+    if (applauseTagRef.current) applauseTagRef.current.volume = 0.25 * scale;
+    if (roleRevealTagRef.current) roleRevealTagRef.current.volume = 0.4 * scale;
+    if (roleRevealCivilTagRef.current) roleRevealCivilTagRef.current.volume = 0.5 * scale;
+    if (roleRevealImpostorTagRef.current) roleRevealImpostorTagRef.current.volume = 0.5 * scale;
+  }, [sfxVolume]);
+  // Lógica para desmutear el iframe de YouTube tras breve delay (mejor autoplay)
+  useEffect(() => {
+    if (ytVideoId && state?.phase === 'IN_GAME' && soundEnabled) {
+      setYtUnmute(false);
+      const t = setTimeout(() => setYtUnmute(true), 600);
+      return () => clearTimeout(t);
+    } else {
+      setYtUnmute(false);
+    }
+  }, [ytVideoId, state?.phase, soundEnabled]);
+  // Cuando ytUnmute pasa a true intentar reproducir ambient YouTube si existe
+  useEffect(() => {
+    if (ytUnmute) {
+      const amb = ytPlayersRef.current['ambient'];
+      try { amb?.playVideo?.(); } catch {}
+    }
+  }, [ytUnmute]);
   const [turnInputText, setTurnInputText] = useState('');
   // Palabra secreta persistente independiente del modal
   const [secretLocation, setSecretLocation] = useState<string | null>(null);
+  const [secretCategory, setSecretCategory] = useState<string | null>(null);
   const secretLocationRef = React.useRef<string | null>(null);
   // local TEST meta
   const [localTurnOrder, setLocalTurnOrder] = useState<string[]>([]);
@@ -312,7 +513,11 @@ export default function App() {
 
   // Determinar mi rol y la ubicación: preferir overridePlayerInfo, luego playerInfo del cliente, luego datos del state
   const me = myId ? s.players.find((p: Player) => p.id === myId || p.socketId === myId) : undefined;
-  const myRole: Role | undefined = overridePlayerInfo?.role ?? playerInfo?.role ?? (me ? (me.role as Role) : undefined);
+  let myRole: Role | undefined = overridePlayerInfo?.role ?? playerInfo?.role ?? (me ? (me.role as Role) : undefined);
+  // Modo impostor oculto: si el server nos envió el rol real pero la configuración oculta está activa y somos impostor, tratarnos como CREWMATE
+  if (s.settings?.hiddenImpostor && myRole === 'IMPOSTOR') {
+    myRole = 'CREWMATE';
+  }
   // Fallback incluye secretLocation recibido por PRIVATE_LOCATION
   const locationInitial = overridePlayerInfo?.location ?? playerInfo?.location ?? s.location ?? secretLocationRef.current ?? secretLocation ?? null;
 
@@ -333,12 +538,12 @@ export default function App() {
       if (tick <= 0) {
         clearInterval(iv);
         // revelar rol
-        setRevealedRole(myRole ?? null);
+  setRevealedRole(myRole ?? null);
         // Recalcular usando estados más recientes por si llegaron eventos después
   const latestLocation = secretLocationRef.current || secretLocation || playerInfo?.location || overridePlayerInfo?.location || locationInitial;
-        if (myRole === 'CREWMATE') setRevealedLocation(latestLocation ?? revealedLocation ?? null);
-        else setRevealedLocation(null);
-        playRevealSound(myRole === 'CREWMATE');
+  if (myRole === 'CREWMATE') setRevealedLocation(latestLocation ?? revealedLocation ?? null);
+  else setRevealedLocation(null);
+  playRevealSound(myRole === 'CREWMATE');
       }
     }, 1000);
   }
@@ -395,7 +600,7 @@ export default function App() {
       const g = ctx.createGain();
       o.type = 'sine';
       o.frequency.value = freq;
-      g.gain.value = 0.0005;
+      g.gain.value = 0.0005 * (sfxVolume / 100);
       o.connect(g);
       g.connect(ctx.destination);
       const now = ctx.currentTime;
@@ -408,6 +613,41 @@ export default function App() {
   }
 
   function playRevealSound(success = true) {
+    if (!canPlay()) return;
+    // Intentar audio remoto primero
+    try {
+      if (success) {
+        const ytP = ytPlayersRef.current['civil'];
+        if (ytIds.civil && ytP && ytApiReadyRef.current) {
+          ytP.seekTo(0); ytP.playVideo();
+          setTimeout(() => { try { ytP.pauseVideo(); } catch {} }, 2500);
+          return;
+        }
+      } else {
+        const ytP = ytPlayersRef.current['impostor'];
+        if (ytIds.impostor && ytP && ytApiReadyRef.current) {
+          ytP.seekTo(0); ytP.playVideo();
+          setTimeout(() => { try { ytP.pauseVideo(); } catch {} }, 2500);
+          return;
+        }
+      }
+      if (success && roleRevealCivilTagRef.current) {
+        roleRevealCivilTagRef.current.currentTime = 0;
+        roleRevealCivilTagRef.current.play().catch(() => {});
+        return;
+      }
+      if (!success && roleRevealImpostorTagRef.current) {
+        roleRevealImpostorTagRef.current.currentTime = 0;
+        roleRevealImpostorTagRef.current.play().catch(() => {});
+        return;
+      }
+      if (roleRevealTagRef.current) { // genérico
+        roleRevealTagRef.current.currentTime = 0;
+        roleRevealTagRef.current.play().catch(() => {});
+        return;
+      }
+    } catch {}
+    // Fallback WebAudio tonal
     try {
       const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
       const ctx = new AudioContext();
@@ -415,16 +655,14 @@ export default function App() {
       const g = ctx.createGain();
       o.type = success ? 'triangle' : 'sawtooth';
       o.frequency.value = success ? 660 : 220;
-      g.gain.value = 0.0005;
-      o.connect(g);
-      g.connect(ctx.destination);
+      g.gain.value = 0.0005 * (sfxVolume / 100);
+      o.connect(g); g.connect(ctx.destination);
       const now = ctx.currentTime;
       g.gain.exponentialRampToValueAtTime(0.18, now + 0.01);
       g.gain.exponentialRampToValueAtTime(0.0001, now + 0.5);
-      o.start(now);
-      o.stop(now + 0.5);
+      o.start(now); o.stop(now + 0.5);
       setTimeout(() => ctx.close(), 700);
-    } catch (e) {}
+    } catch {}
   }
 
   function handleCreate() {
@@ -468,19 +706,50 @@ export default function App() {
     playClick();
     // Si estamos en modo TEST simulamos START localmente
     if (roomId === 'TEST' && state) {
-      const words = wordCategories[localCategory as keyof typeof wordCategories] ?? wordCategories['Alimentos'];
-      const location = words[Math.floor(Math.random() * words.length)];
+      // Seleccionar pareja aleatoria del sistema unificado
+      const pair = wordPairs[Math.floor(Math.random() * wordPairs.length)];
       const impostorIndex = Math.floor(Math.random() * state.players.length);
       const impostor = state.players[impostorIndex];
+      const hidden = !!state.settings?.hiddenImpostor;
+      // Roles reales (internos)
       const newPlayers = state.players.map((p: Player) => ({
         ...p,
         role: p.id === impostor.id ? ('IMPOSTOR' as Role) : ('CREWMATE' as Role)
       }));
-      const newState: GameState = { ...state, players: newPlayers, impostorId: impostor.id, location, phase: 'IN_GAME' };
+      const newState: GameState = {
+        ...state,
+        players: newPlayers,
+        impostorId: impostor.id,
+        location: pair.civilian, // palabra civil (servidor la guarda así)
+        category: pair.category,
+        phase: 'IN_GAME'
+      };
       setState(newState);
-      // iniciar secuencia de revelado en modo TEST
-      startRevealSequence(newState);
-      setLogs((l) => [...l, `Modo TEST: juego iniciado. Impostor: ${impostor.name}`]);
+      // Ajustar palabra/rol privados locales simulando emisiones SERVER->CLIENT
+      const myId = localId;
+      if (myId) {
+        const isImpostor = myId === impostor.id;
+        const overrideInfo = {
+          role: isImpostor ? (hidden ? 'CREWMATE' : 'IMPOSTOR') : 'CREWMATE',
+          location: isImpostor ? (hidden ? pair.impostor : null) : pair.civilian
+        } as { role?: Role | null; location?: string | null };
+        // Simular recepción de PRIVATE_LOCATION
+        if (!isImpostor || hidden) {
+          setSecretLocation(overrideInfo.location || null);
+          setSecretCategory(pair.category);
+          secretLocationRef.current = overrideInfo.location || null;
+        } else {
+          setSecretLocation(null);
+          setSecretCategory(pair.category);
+          secretLocationRef.current = null;
+        }
+        // iniciar secuencia usando override
+        startRevealSequence(newState, myId, overrideInfo);
+        setPlayerInfo(overrideInfo);
+      } else {
+        startRevealSequence(newState);
+      }
+      setLogs((l) => [...l, `Modo TEST: juego iniciado. Impostor: ${impostor.name} | Cat: ${pair.category}`]);
       return;
     }
 
@@ -488,7 +757,7 @@ export default function App() {
     socket.emit('START_GAME', roomId);
   }
 
-  function handleUpdateSettings(settings: { impostorCount?: number; turnTimeSeconds?: number; voteTimeSeconds?: number; discussionTimeSeconds?: number; category?: string; categories?: string[] }) {
+  function handleUpdateSettings(settings: { impostorCount?: number; turnTimeSeconds?: number; voteTimeSeconds?: number; discussionTimeSeconds?: number; category?: string; categories?: string[]; hiddenImpostor?: boolean }) {
     if (!roomId) return;
     socket.emit('UPDATE_SETTINGS', roomId, settings);
   }
@@ -500,7 +769,10 @@ export default function App() {
   }
 
   // Sonidos simples con WebAudio (no requiere archivos)
+  function canPlay() { return soundEnabled; }
+
   function playClick() {
+    if (!canPlay()) return;
     try {
       const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
       const ctx = new AudioContext();
@@ -508,7 +780,7 @@ export default function App() {
       const g = ctx.createGain();
       o.type = 'sine';
       o.frequency.value = 880; // A5 short click
-      g.gain.value = 0.001;
+      g.gain.value = 0.001 * (sfxVolume / 100);
       o.connect(g);
       g.connect(ctx.destination);
       const now = ctx.currentTime;
@@ -525,6 +797,7 @@ export default function App() {
   }
 
   function playWordSound() {
+    if (!canPlay()) return;
     try {
       const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
       const ctx = new AudioContext();
@@ -532,7 +805,7 @@ export default function App() {
       const g = ctx.createGain();
       o.type = 'square';
       o.frequency.value = 740;
-      g.gain.value = 0.0006;
+      g.gain.value = 0.0006 * (sfxVolume / 100);
       o.connect(g);
       g.connect(ctx.destination);
       const now = ctx.currentTime;
@@ -545,6 +818,7 @@ export default function App() {
   }
 
   function playVoteResultSound(success = true) {
+    if (!canPlay()) return;
     try {
       const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
       const ctx = new AudioContext();
@@ -552,7 +826,7 @@ export default function App() {
       const g = ctx.createGain();
       o.type = success ? 'sine' : 'triangle';
       o.frequency.value = success ? 440 : 220;
-      g.gain.value = 0.0006;
+      g.gain.value = 0.0006 * (sfxVolume / 100);
       o.connect(g);
       g.connect(ctx.destination);
       const now = ctx.currentTime;
@@ -562,6 +836,125 @@ export default function App() {
       o.stop(now + 0.4);
       setTimeout(() => ctx.close(), 700);
     } catch (e) {}
+  }
+
+  function playDrumTick() {
+    if (!canPlay()) return;
+    const ytP = ytPlayersRef.current['drum'];
+    if (ytIds.drum && ytP && ytApiReadyRef.current) {
+      try {
+        ytP.seekTo(0);
+        ytP.playVideo();
+        setTimeout(() => { try { ytP.pauseVideo(); } catch {} }, 1200);
+        return;
+      } catch {}
+    }
+    try {
+      if (drumTagRef.current) {
+        drumTagRef.current.currentTime = 0;
+        drumTagRef.current.play().catch(() => {});
+        return;
+      }
+    } catch {}
+    // Fallback WebAudio
+    try {
+      const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+      const ctx = new AudioContext();
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = 'sine'; o.frequency.value = 120; g.gain.value = 0.0008;
+      g.gain.value = 0.0008 * (sfxVolume / 100);
+      o.connect(g); g.connect(ctx.destination);
+      const now = ctx.currentTime;
+      g.gain.setValueAtTime(0.0001, now);
+      g.gain.exponentialRampToValueAtTime(0.2, now + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + 0.2);
+      o.start(now); o.stop(now + 0.22);
+      setTimeout(() => ctx.close(), 300);
+    } catch {}
+  }
+
+  function playApplause() {
+    if (!canPlay()) return;
+    const ytP = ytPlayersRef.current['applause'];
+    if (ytIds.applause && ytP && ytApiReadyRef.current) {
+      try {
+        ytP.seekTo(0);
+        ytP.playVideo();
+        setTimeout(() => { try { ytP.pauseVideo(); } catch {} }, 3500);
+        return;
+      } catch {}
+    }
+    try {
+      if (applauseTagRef.current) {
+        applauseTagRef.current.currentTime = 0;
+        applauseTagRef.current.play().catch(() => {});
+        return;
+      }
+    } catch {}
+    // Fallback WebAudio (ruido)
+    try {
+      const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+      const ctx = new AudioContext();
+      const noiseBuffer = ctx.createBuffer(1, ctx.sampleRate * 0.7, ctx.sampleRate);
+      const data = noiseBuffer.getChannelData(0);
+      for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (ctx.sampleRate * 0.7));
+      const src = ctx.createBufferSource(); src.buffer = noiseBuffer;
+      const g = ctx.createGain(); g.gain.value = 0.05;
+      g.gain.value = 0.05 * (sfxVolume / 100);
+      src.connect(g); g.connect(ctx.destination);
+      src.start(); setTimeout(() => ctx.close(), 900);
+    } catch {}
+  }
+
+  function startAmbient() {
+    if (!canPlay()) return;
+    try {
+      // Si hay player YouTube ambient disponible usarlo
+      const ytAmb = ytPlayersRef.current['ambient'];
+      if (ytAmb && ytApiReadyRef.current) {
+        try { ytAmb.setLoop?.(true); ytAmb.playVideo(); ytAmb.setVolume?.(sfxVolume); } catch {}
+        return;
+      }
+      // Preferir pista remota si está configurada
+      if (ambientTagRef.current) {
+        ambientTagRef.current.currentTime = 0;
+        ambientTagRef.current.play().catch(() => {});
+        return;
+      }
+      // Fallback WebAudio ambiente simple
+      if (ambientGainRef.current) return; // already playing
+      const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+      const ctx = audioCtxRef.current ?? new AudioContext();
+      audioCtxRef.current = ctx;
+      const osc = ctx.createOscillator();
+      const lfo = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine'; osc.frequency.value = 220;
+      lfo.type = 'sine'; lfo.frequency.value = 0.15;
+      const lfoGain = ctx.createGain(); lfoGain.gain.value = 10;
+      lfo.connect(lfoGain); lfoGain.connect(osc.frequency as any);
+      gain.gain.value = 0.01; osc.connect(gain); gain.connect(ctx.destination);
+  gain.gain.value = 0.01 * (sfxVolume / 100);
+      osc.start(); lfo.start();
+      ambientGainRef.current = gain; ambientOscRef.current = osc; ambientLFORef.current = lfo;
+    } catch {}
+  }
+
+  function stopAmbient() {
+    try {
+      const ytAmb = ytPlayersRef.current['ambient'];
+      if (ytAmb && ytApiReadyRef.current) {
+        try { ytAmb.pauseVideo(); } catch {}
+      }
+      if (ambientTagRef.current) {
+        ambientTagRef.current.pause();
+      }
+      ambientOscRef.current?.stop(); ambientLFORef.current?.stop(); ambientGainRef.current?.disconnect();
+      ambientOscRef.current = null;
+      ambientLFORef.current = null;
+      ambientGainRef.current = null;
+    } catch {}
   }
 
   // Auto-scroll chat to bottom on new messages
@@ -591,10 +984,10 @@ export default function App() {
     }, [inputRef, value]);
     return (
       <div className="flex flex-col gap-2">
-        <input ref={inputRef} onTouchStart={(e) => e.stopPropagation()} value={value} onChange={(e) => onChange(e.target.value)} placeholder="Escribe tu palabra o pista" className="p-2 border rounded-lg" inputMode="text" />
+        <input ref={inputRef} onTouchStart={(e) => e.stopPropagation()} value={value} onChange={(e) => onChange(e.target.value)} placeholder="Escribe tu palabra o pista" className={`p-2 border rounded-lg ${darkMode ? 'border-slate-700 bg-slate-800 text-slate-100' : 'border-slate-200 bg-white'}`} inputMode="text" />
         <div className="flex gap-2">
           <button type="button" onTouchStart={() => playClick()} onClick={() => { if (value.trim()) { onSubmit(value.trim()); onChange(''); } }} className="flex-1 py-2 bg-emerald-500 text-white rounded-lg">Enviar</button>
-          <button type="button" onTouchStart={() => playClick()} onClick={() => { onChange(''); onSkip(); }} className="flex-1 py-2 bg-slate-200 rounded-lg">Omitir</button>
+          <button type="button" onTouchStart={() => playClick()} onClick={() => { onChange(''); onSkip(); }} className={`flex-1 py-2 rounded-lg ${darkMode ? 'bg-slate-700 text-slate-100 hover:bg-slate-600' : 'bg-slate-200'}`}>Omitir</button>
         </div>
       </div>
     );
@@ -603,55 +996,89 @@ export default function App() {
   return (
   <div className={`min-h-screen p-4 ${darkMode ? 'dark-body' : 'bg-gradient-to-b from-slate-50 to-slate-100'}`}>
         <main className="space-y-4">
+          {/* Voting reveal countdown overlay */}
+          {typeof revealCountdown === 'number' && revealCountdown > 0 && (
+            <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 animate-fade-in">
+              <div className="text-center animate-pop-in">
+                <div className="text-7xl font-extrabold text-white drop-shadow">{revealCountdown}</div>
+                <div className="mt-2 text-sm text-slate-200">Revelando resultado...</div>
+              </div>
+            </div>
+          )}
+          {/* Copy toast */}
+          {copyToast && (
+            <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[70] px-3 py-2 rounded-lg bg-black/70 text-white text-sm animate-pop-in">
+              {copyToast}
+            </div>
+          )}
           {/* Lobby or Game view depending on phase */}
           {state && (state.phase === 'IN_GAME' || state.phase === 'ROUND_END' || state.phase === 'VOTING' || state.phase === 'DISCUSSION') ? (
             <div className="space-y-4">
+              {/* Ambient YouTube ahora gestionado vía IFrame API (sin iframe embed directo) */}
               {/* Header simplificado para vista de juego: emoji rol, turno actual y temporizador, menú */}
               <div className={`sticky top-0 z-40 ${darkMode ? 'bg-slate-900/80 text-slate-100' : 'bg-white/60'} backdrop-blur-md rounded-b-xl py-3 mb-2 px-3 flex items-center justify-between`}> 
                 <div className="flex items-center gap-3">
                   <div className="w-12 h-12 rounded-full flex items-center justify-center text-2xl" aria-hidden>
-                    {/* mostrar emoji según rol: si aún no revelado pero role existe en state, usarlo */}
+                    {/* Emoji rol (aplica máscara para impostor oculto) */}
                     {(() => {
                       const me = state.players.find((p: Player) => p.socketId === socket.id);
-                      const role = revealedRole ?? (me?.role as Role | undefined) ?? null;
+                      let role = revealedRole ?? (me?.role as Role | undefined) ?? null;
+                      if (state.settings?.hiddenImpostor && role === 'IMPOSTOR') role = 'CREWMATE';
                       return role ? ROLE_EMOJI[role] : '❓';
                     })()}
                   </div>
                   <div>
                     <div className="text-sm font-semibold">{(() => {
                       const me = state.players.find((p: Player) => p.socketId === socket.id);
-                      const role = revealedRole ?? (me?.role as Role | undefined) ?? null;
+                      let role = revealedRole ?? (me?.role as Role | undefined) ?? null;
+                      if (state.settings?.hiddenImpostor && role === 'IMPOSTOR') role = 'CREWMATE';
                       return role === 'CREWMATE' ? 'Civil' : role === 'IMPOSTOR' ? 'Impostor' : 'Jugador';
                     })()}</div>
-                    {/* Si eres civil: mostrar tu palabra arriba en lugar de reglas */}
                     {(() => {
                       const me = state.players.find((p: Player) => p.socketId === socket.id);
-                      const role = revealedRole ?? (me?.role as Role | undefined) ?? null;
-                      const wordShown = revealedLocation ?? secretLocation ?? '—';
-                      return role === 'CREWMATE' ? (
-                        <div className="text-xs opacity-80">Tu palabra: <span className="font-medium">{wordShown}</span></div>
-                      ) : null;
+                      let role = revealedRole ?? (me?.role as Role | undefined) ?? null;
+                      const hidden = state.settings?.hiddenImpostor;
+                      if (hidden && role === 'IMPOSTOR') role = 'CREWMATE';
+                      const catShown = secretCategory ?? state?.category ?? null;
+                      const wordEffective = revealedLocation ?? secretLocation ?? null;
+                      if (role === 'CREWMATE') {
+                        return <div className="text-xs opacity-80">Categoría: <span className="font-medium">{catShown ?? '—'}</span> · Palabra: <span className="font-medium">{wordEffective ?? '—'}</span></div>;
+                      }
+                      if (role === 'IMPOSTOR' && !hidden) {
+                        return <div className="text-xs opacity-80">Categoría: <span className="font-medium">{catShown ?? '—'}</span></div>;
+                      }
+                      return null;
                     })()}
-                    {revealedRole === 'IMPOSTOR' && (
-                      <div className="text-xs opacity-80">Objetivo: evitar que te descubran. Observa las palabras.</div>
-                    )}
+                    {(() => {
+                      const me = state.players.find((p: Player) => p.socketId === socket.id);
+                      let role = revealedRole ?? (me?.role as Role | undefined) ?? null;
+                      const hidden = state.settings?.hiddenImpostor;
+                      if (hidden && role === 'IMPOSTOR') role = 'CREWMATE';
+                      if (role === 'IMPOSTOR' && !hidden) return <div className="text-xs opacity-80">Objetivo: evita ser descubierto.</div>;
+                      return null;
+                    })()}
                   </div>
                 </div>
 
                 <div className="flex items-center gap-3">
                   {state.phase === 'IN_GAME' && (
-                    <div className="text-xs text-slate-500 text-center mr-3">
+                    <div className={`text-xs ${darkMode ? 'text-slate-300' : 'text-slate-500'} text-center mr-3`}>
                       <div className="text-[10px]">Turno actual</div>
                       <div className="font-semibold">{currentTurn ? (state.players.find((p: Player) => p.id === currentTurn)?.name ?? currentTurn) : '-'}</div>
                       <div className="text-[11px] mt-1">{turnTimer !== null ? `${turnTimer}s` : '—'}</div>
                     </div>
                   )}
                   <div className="relative">
-                    <button type="button" onClick={() => setMenuOpen((s) => !s)} className="px-3 py-2 bg-slate-100 rounded-lg">⋯</button>
+                    <button type="button" onClick={() => setMenuOpen((s) => !s)} className={`px-3 py-2 rounded-lg ${darkMode ? 'bg-slate-700 text-slate-100 hover:bg-slate-600' : 'bg-slate-100 hover:bg-slate-200'}`}>⋯</button>
                     {menuOpen && (
-                      <div className={`absolute right-0 mt-2 w-40 rounded-lg shadow-md p-2 ${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'}`}>
+                      <div className={`absolute right-0 mt-2 w-44 rounded-lg shadow-md p-2 ${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'}`}>
                         <button type="button" onClick={() => { setMenuOpen(false); /* salir */ setState(null); setRoomId(null); setLogs([]); }} className="w-full text-left p-2 rounded hover:bg-slate-50">Salir de la sala</button>
                         <button type="button" onClick={() => { setDarkMode((d) => !d); setMenuOpen(false); }} className="w-full text-left p-2 rounded hover:bg-slate-50">Modo oscuro: {darkMode ? 'ON' : 'OFF'}</button>
+                        <button type="button" onClick={() => { const next = !soundEnabled; setSoundEnabled(next); if (!next) stopAmbient(); else if (state && ['IN_GAME','VOTING','DISCUSSION','ROUND_END'].includes(state.phase)) startAmbient(); setMenuOpen(false); }} className="w-full text-left p-2 rounded hover:bg-slate-50">Sonidos: {soundEnabled ? 'ON' : 'OFF'}</button>
+                        <div className="px-2 py-1">
+                          <label className="text-[10px] opacity-70">Volumen {sfxVolume}%</label>
+                          <input type="range" min={0} max={100} value={sfxVolume} onChange={(e) => setSfxVolume(Number(e.target.value))} className="w-full" />
+                        </div>
                       </div>
                     )}
                   </div>
@@ -662,20 +1089,32 @@ export default function App() {
               <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow p-3 flex flex-col h-[58vh]`}>
                 {state?.phase !== 'IN_GAME' && (
                   <div className="flex items-center gap-2 mb-2">
-                    <button type="button" className={`px-3 py-1 rounded-lg text-sm ${activeFeed === 'pistas' ? 'bg-sky-600 text-white' : 'bg-slate-100'}`} onClick={() => setActiveFeed('pistas')}>Pistas</button>
-                    <button type="button" className={`px-3 py-1 rounded-lg text-sm ${activeFeed === 'chat' ? 'bg-sky-600 text-white' : 'bg-slate-100'}`} onClick={() => setActiveFeed('chat')}>Chat</button>
+                    <button
+                      type="button"
+                      className={`px-3 py-1 rounded-lg text-sm ${activeFeed === 'pistas'
+                        ? (darkMode ? 'bg-sky-600 text-white' : 'bg-sky-600 text-white')
+                        : (darkMode ? 'bg-slate-700 text-slate-200' : 'bg-slate-100 text-slate-800')}`}
+                      onClick={() => setActiveFeed('pistas')}>Pistas</button>
+                    <button
+                      type="button"
+                      className={`px-3 py-1 rounded-lg text-sm ${activeFeed === 'chat'
+                        ? (darkMode ? 'bg-sky-600 text-white' : 'bg-sky-600 text-white')
+                        : (darkMode ? 'bg-slate-700 text-slate-200' : 'bg-slate-100 text-slate-800')}`}
+                      onClick={() => setActiveFeed('chat')}>Chat</button>
                     {state?.phase === 'DISCUSSION' && (
                       <span className="ml-auto text-xs text-amber-600">Fase de discusión</span>
                     )}
                   </div>
                 )}
                 {activeFeed === 'pistas' ? (
-                  <div className="flex-1 overflow-auto p-2 flex flex-col" ref={wordsRef}>
+                  <div className="flex-1 overflow-auto p-2 flex flex-col animate-fade-in" ref={wordsRef}>
                     {submittedWords.length === 0 ? <div className="text-xs text-slate-400">Aún no hay pistas</div> : (
                       submittedWords.map((w, i) => {
                         const isMe = (localId && w.playerId === localId) || (roomId === 'TEST' && w.playerId === localTurnOrder[localCurrentIndex]);
                         return (
-                          <div key={i} className={`max-w-full w-fit ${isMe ? 'self-end bg-sky-600 text-white' : 'self-start bg-slate-100 text-slate-800'} px-3 py-2 rounded-lg my-1`}> 
+                          <div key={i} className={`max-w-full w-fit ${isMe
+                            ? (darkMode ? 'self-end bg-sky-600 text-white' : 'self-end bg-sky-600 text-white')
+                            : (darkMode ? 'self-start bg-slate-700 text-slate-200' : 'self-start bg-slate-100 text-slate-800')} px-3 py-2 rounded-lg my-1`}> 
                             <div className="text-sm">{w.word}</div>
                             <div className="text-xs opacity-70 mt-1">{state.players.find((p: Player) => p.id === w.playerId)?.name ?? w.playerId}</div>
                           </div>
@@ -684,12 +1123,14 @@ export default function App() {
                     )}
                   </div>
                 ) : (
-                  <div className="flex-1 overflow-auto p-2 flex flex-col" ref={messagesRef}>
+                  <div className="flex-1 overflow-auto p-2 flex flex-col animate-fade-in" ref={messagesRef}>
                     {messages.length === 0 ? <div className="text-xs text-slate-400">Sin mensajes</div> : (
                       messages.map((m, i) => {
                         const isMe = (localId && m.playerId === localId);
                         return (
-                          <div key={i} className={`max-w-full w-fit ${isMe ? 'self-end bg-indigo-600 text-white' : 'self-start bg-slate-100 text-slate-800'} px-3 py-2 rounded-lg my-1`}> 
+                          <div key={i} className={`max-w-full w-fit ${isMe
+                            ? (darkMode ? 'self-end bg-indigo-600 text-white' : 'self-end bg-indigo-600 text-white')
+                            : (darkMode ? 'self-start bg-slate-700 text-slate-200' : 'self-start bg-slate-100 text-slate-800')} px-3 py-2 rounded-lg my-1`}> 
                             <div className="text-sm whitespace-pre-wrap break-words">{m.text}</div>
                             <div className="text-xs opacity-70 mt-1">{state?.players.find((p: Player) => p.id === m.playerId)?.name ?? m.playerId}</div>
                           </div>
@@ -716,7 +1157,7 @@ export default function App() {
                   )}
                   { state?.phase !== 'IN_GAME' && (
                     <div className="flex gap-2 items-center">
-                      <input value={chatInput} onChange={(e)=> setChatInput(e.target.value)} placeholder="Escribe un mensaje..." className="flex-1 p-2 border rounded-lg" onKeyDown={(e)=> { if (e.key === 'Enter' && chatInput.trim() && state) { socket.emit('CHAT_MESSAGE', state.roomId, chatInput.trim()); setChatInput(''); } }} />
+                      <input value={chatInput} onChange={(e)=> setChatInput(e.target.value)} placeholder="Escribe un mensaje..." className={`flex-1 p-2 border rounded-lg ${darkMode ? 'border-slate-700 bg-slate-800 text-slate-100 placeholder:text-slate-400' : 'border-slate-200 bg-white'}`} onKeyDown={(e)=> { if (e.key === 'Enter' && chatInput.trim() && state) { socket.emit('CHAT_MESSAGE', state.roomId, chatInput.trim()); setChatInput(''); } }} />
                       <button type="button" className="px-3 py-2 bg-sky-600 text-white rounded-lg" onClick={() => { if (chatInput.trim() && state) { socket.emit('CHAT_MESSAGE', state.roomId, chatInput.trim()); setChatInput(''); } }}>Enviar</button>
                     </div>
                   )}
@@ -736,13 +1177,13 @@ export default function App() {
 
               {/* Modal de votación emergente */}
               {votingOpen && state && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-                  <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-sm p-6`}>
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 animate-fade-in">
+                  <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-sm p-6 animate-pop-in`}>
                     <div className="text-lg font-semibold mb-1">Vota por un jugador</div>
                     {(() => {
                       const alive = state.players.filter((p: Player) => p.alive).length;
                       const majority = Math.floor(alive / 2) + 1;
-                      return <div className="text-xs text-slate-500 mb-2">Mayoría: {majority} votos</div>;
+                      return <div className={`text-xs ${darkMode ? 'text-slate-400' : 'text-slate-500'} mb-2`}>Mayoría: {majority} votos</div>;
                     })()}
                     <div className="grid gap-2 max-h-64 overflow-auto">
                       {state.players.filter((p: Player) => p.alive).map((p: Player) => {
@@ -777,7 +1218,7 @@ export default function App() {
                               const majority = Math.floor(alive / 2) + 1;
                               const remaining = Math.max(0, majority - voteCount);
                               return (
-                                <div className="text-[11px] text-slate-500 mt-1">Votos: {voteCount}{remaining > 0 ? ` · Faltan ${remaining}` : ' · ¡Mayoría!'}
+                                <div className={`text-[11px] ${darkMode ? 'text-slate-400' : 'text-slate-500'} mt-1`}>Votos: {voteCount}{remaining > 0 ? ` · Faltan ${remaining}` : ' · ¡Mayoría!'}
                                 </div>
                               );
                             })()}
@@ -815,12 +1256,17 @@ export default function App() {
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
-                  <div className="text-xs text-slate-500 mr-2">{roomId ?? ''}</div>
+                  <div className={`text-xs ${darkMode ? 'text-slate-300' : 'text-slate-500'} mr-2`}>{roomId ?? ''}</div>
                   <div className="relative">
-                    <button type="button" onClick={() => setMenuOpenLobby((s) => !s)} className="px-3 py-2 bg-slate-100 rounded-lg">⋯</button>
+                    <button type="button" onClick={() => setMenuOpenLobby((s) => !s)} className={`px-3 py-2 rounded-lg ${darkMode ? 'bg-slate-700 text-slate-100 hover:bg-slate-600' : 'bg-slate-100 hover:bg-slate-200'}`}>⋯</button>
                     {menuOpenLobby && (
-                      <div className={`absolute right-0 mt-2 w-40 rounded-lg shadow-md p-2 z-50 ${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'}`}>
+                      <div className={`absolute right-0 mt-2 w-44 rounded-lg shadow-md p-2 z-50 ${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'}`}>
                         <button type="button" onClick={() => { setDarkMode((d) => !d); setMenuOpenLobby(false); }} className="w-full text-left p-2 rounded hover:bg-slate-50">Modo oscuro: {darkMode ? 'ON' : 'OFF'}</button>
+                        <button type="button" onClick={() => { const next = !soundEnabled; setSoundEnabled(next); if (!next) stopAmbient(); setMenuOpenLobby(false); }} className="w-full text-left p-2 rounded hover:bg-slate-50">Sonidos: {soundEnabled ? 'ON' : 'OFF'}</button>
+                        <div className="px-2 py-1">
+                          <label className="text-[10px] opacity-70">Volumen {sfxVolume}%</label>
+                          <input type="range" min={0} max={100} value={sfxVolume} onChange={(e) => setSfxVolume(Number(e.target.value))} className="w-full" />
+                        </div>
                       </div>
                     )}
                   </div>
@@ -828,11 +1274,11 @@ export default function App() {
               </header>
 
               <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow p-4 transition-transform duration-300 ease-out transform`}> 
-                <label className="block text-xs text-slate-500">Tu nombre</label>
+                <label className={`block text-xs ${darkMode ? 'text-slate-300' : 'text-slate-500'}`}>Tu nombre</label>
                 <input className={`w-full mt-1 p-3 rounded-lg border ${darkMode ? 'border-slate-700 bg-slate-800 text-slate-100' : 'border-slate-200 bg-white' } focus:outline-none focus:ring-2 focus:ring-sky-400`} placeholder="Ej. Ana" value={name} onChange={(e) => setName(e.target.value)} />
 
                 <div className="mt-3">
-                  <label className="block text-xs text-slate-500">Código de sala</label>
+                  <label className={`block text-xs ${darkMode ? 'text-slate-300' : 'text-slate-500'}`}>Código de sala</label>
                   <div className="flex gap-3 mt-1">
                     <input className={`flex-1 p-3 rounded-lg border ${darkMode ? 'border-slate-700 bg-slate-800 text-slate-100' : 'border-slate-200 bg-white'} uppercase tracking-widest text-center`} placeholder="ABCD" value={room} onChange={(e) => setRoom(e.target.value)} />
                     <button type="button" onTouchStart={() => playClick()} onClick={handleJoin} className="px-4 py-3 bg-sky-600 text-white rounded-lg shadow">Unirse</button>
@@ -842,7 +1288,7 @@ export default function App() {
                 <div className="mt-4 flex gap-3">
                   <button type="button" onTouchStart={() => playClick()} onClick={handleCreate} className="flex-1 py-3 bg-emerald-500 text-white rounded-lg shadow">Crear sala</button>
                   <div className="relative">
-                    <button type="button" onClick={() => setSettingsModalOpen(true)} className="px-3 py-3 bg-slate-100 rounded-lg">⋯</button>
+                    <button type="button" onClick={() => setSettingsModalOpen(true)} className={`px-3 py-3 rounded-lg ${darkMode ? 'bg-slate-700 text-slate-100 hover:bg-slate-600' : 'bg-slate-100 hover:bg-slate-200'}`}>⋯</button>
                   </div>
                   <button type="button" onTouchStart={() => playClick()} onClick={handleStart} disabled={!state || (roomId !== 'TEST' && state.ownerId !== localId)} className="flex-1 py-3 bg-orange-500 text-white rounded-lg shadow disabled:opacity-50">Iniciar juego</button>
                 </div>
@@ -880,19 +1326,19 @@ export default function App() {
           )}
           {/* Create room confirmation modal */}
           {createConfirmOpen && roomId && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-sm p-6 text-center`}>
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 animate-fade-in">
+              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-sm p-6 text-center animate-pop-in`}>
                 <div className="text-lg font-semibold mb-2">Sala creada</div>
-                <div className="text-sm text-slate-500 mb-3">Comparte este código con tus amigos:</div>
+                <div className={`text-sm ${darkMode ? 'text-slate-400' : 'text-slate-500'} mb-3`}>Comparte este código con tus amigos:</div>
                 <div className="text-4xl font-extrabold tracking-widest mb-4">{roomId}</div>
                 <div className="flex gap-2">
                   <button
-                    className="flex-1 py-2 bg-slate-200 rounded-lg"
+                    className={`flex-1 py-2 rounded-lg ${darkMode ? 'bg-slate-700 text-slate-100 hover:bg-slate-600' : 'bg-slate-200'}`}
                     onClick={() => setCreateConfirmOpen(false)}
                   >Cerrar</button>
                   <button
                     className="flex-1 py-2 bg-sky-600 text-white rounded-lg"
-                    onClick={async () => { try { await navigator.clipboard.writeText(roomId); } catch { /* noop */ } }}
+                    onClick={async () => { try { await navigator.clipboard.writeText(roomId); setCopyToast('Código copiado'); setTimeout(()=> setCopyToast(null), 1500); } catch { /* noop */ } }}
                   >Copiar código</button>
                 </div>
               </div>
@@ -900,19 +1346,19 @@ export default function App() {
           )}
           {/* Join room confirmation modal */}
           {joinConfirmOpen && roomId && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-sm p-6 text-center`}>
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 animate-fade-in">
+              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-sm p-6 text-center animate-pop-in`}>
                 <div className="text-lg font-semibold mb-2">Te uniste a la sala</div>
                 <div className="text-3xl font-extrabold tracking-widest mb-3">{roomId}</div>
-                <div className="text-xs text-slate-500 mb-4">Espera al dueño para iniciar el juego</div>
+                <div className={`text-xs ${darkMode ? 'text-slate-400' : 'text-slate-500'} mb-4`}>Espera al dueño para iniciar el juego</div>
                 <div className="flex gap-2">
                   <button
-                    className="flex-1 py-2 bg-slate-200 rounded-lg"
+                    className={`flex-1 py-2 rounded-lg ${darkMode ? 'bg-slate-700 text-slate-100 hover:bg-slate-600' : 'bg-slate-200'}`}
                     onClick={() => setJoinConfirmOpen(false)}
                   >Entendido</button>
                   <button
-                    className="flex-1 py-2 bg-slate-100 rounded-lg"
-                    onClick={async () => { try { await navigator.clipboard.writeText(roomId); } catch { /* noop */ } }}
+                    className={`flex-1 py-2 rounded-lg ${darkMode ? 'bg-slate-700 text-slate-100 hover:bg-slate-600' : 'bg-slate-100'}`}
+                    onClick={async () => { try { await navigator.clipboard.writeText(roomId); setCopyToast('Código copiado'); setTimeout(()=> setCopyToast(null), 1500); } catch { /* noop */ } }}
                   >Copiar código</button>
                 </div>
               </div>
@@ -923,8 +1369,8 @@ export default function App() {
         {/* Logs panel removed (kept logs array for internal messages) */}
           {/* Reveal modal */}
           {revealOpen && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-              <div className="bg-white rounded-2xl shadow-lg w-full max-w-sm p-6 text-center transition-transform duration-300 transform">
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 animate-fade-in">
+              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-sm p-6 text-center animate-pop-in`}> 
                 {countdown > 0 ? (
                   <div>
                     <div className="text-sm text-slate-500 mb-2">Preparando rol...</div>
@@ -956,15 +1402,15 @@ export default function App() {
           )}
           {/* Round-end poll modal (todos los jugadores pueden decidir) */}
           {pollOpen && ((state && state.phase === 'ROUND_END') || roundEnded) && state && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-sm p-6 text-center`}>
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 animate-fade-in">
+              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-sm p-6 text-center animate-pop-in`}>
                 <div className="text-lg font-semibold mb-2">Fin de ronda</div>
-                <div className="text-sm text-slate-500 mb-4">¿Qué desean hacer ahora?</div>
+                <div className={`text-sm ${darkMode ? 'text-slate-300' : 'text-slate-500'} mb-4`}>¿Qué desean hacer ahora?</div>
                 <div className="grid grid-cols-2 gap-2 mb-3">
                   <button className="py-2 bg-rose-500 text-white rounded-lg" onClick={() => socket.emit('POLL_CHOICE', state.roomId, 'START')}>Votar</button>
-                  <button className="py-2 bg-slate-200 rounded-lg" onClick={() => socket.emit('POLL_CHOICE', state.roomId, 'DISCUSS')}>Otra ronda</button>
+                  <button className={`py-2 rounded-lg ${darkMode ? 'bg-slate-700 text-slate-100 hover:bg-slate-600' : 'bg-slate-200'}`} onClick={() => socket.emit('POLL_CHOICE', state.roomId, 'DISCUSS')}>Otra ronda</button>
                 </div>
-                <div className="text-xs text-slate-500 mb-3">Jugadores vivos: {pollTotal} · Votar {pollStartVotes} · Otra ronda {pollDiscussVotes}</div>
+                <div className={`text-xs ${darkMode ? 'text-slate-400' : 'text-slate-500'} mb-3`}>Jugadores vivos: {pollTotal} · Votar {pollStartVotes} · Otra ronda {pollDiscussVotes}</div>
                 {(() => {
                   const startIds = pollVotes.filter(v => v.choice === 'START').map(v => v.playerId);
                   const discussIds = pollVotes.filter(v => v.choice === 'DISCUSS').map(v => v.playerId);
@@ -977,7 +1423,7 @@ export default function App() {
                     <div className={`p-2 rounded-lg mb-2 border ${hlClass}`}> 
                       <div className="flex items-center justify-between mb-1">
                         <span className="text-xs font-medium">{title}</span>
-                        <span className="text-[10px] text-slate-500">{ids.length}/{majority}</span>
+                        <span className={`text-[10px] ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>{ids.length}/{majority}</span>
                       </div>
                       <div className="flex flex-wrap gap-1">
                         {ids.length === 0 && <span className="text-[10px] text-slate-400">Sin votos</span>}
@@ -997,7 +1443,7 @@ export default function App() {
                         })}
                       </div>
                       {ids.length >= majority && <div className="mt-1 text-[10px] text-emerald-600 font-semibold">¡Mayoría alcanzada!</div>}
-                      {ids.length < majority && ids.length > 0 && <div className="mt-1 text-[10px] text-slate-500">Faltan {majority - ids.length}</div>}
+                      {ids.length < majority && ids.length > 0 && <div className={`mt-1 text-[10px] ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Faltan {majority - ids.length}</div>}
                     </div>
                     );
                   };
@@ -1011,93 +1457,60 @@ export default function App() {
               </div>
             </div>
           )}
-          {/* Category multi-select modal */}
-          {categoryModalOpen && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-              <div className="bg-white rounded-2xl shadow-lg w-full max-w-sm p-6">
-                <h3 className="text-lg font-semibold mb-4">Categorías de palabras</h3>
-                <div className="space-y-2 max-h-64 overflow-auto">
-                  <label className={`flex items-center gap-2 p-2 rounded-lg cursor-pointer ${localCategories.length === allCategoryKeys.length ? 'bg-sky-100 border border-sky-300' : 'bg-slate-50 hover:bg-slate-100'}`}> 
-                    <input type="checkbox" checked={localCategories.length === allCategoryKeys.length} onChange={(e) => {
-                      if (e.target.checked) {
-                        setLocalCategories(allCategoryKeys);
-                      } else {
-                        setLocalCategories([]);
-                      }
-                    }} />
-                    <span className="text-sm font-medium">Todas</span>
-                  </label>
-                  {allCategoryKeys.map((cat) => {
-                    const checked = localCategories.includes(cat);
-                    return (
-                      <label key={cat} className={`flex items-center gap-2 p-2 rounded-lg cursor-pointer ${checked ? 'bg-sky-100 border border-sky-300' : 'bg-slate-50 hover:bg-slate-100'}`}> 
-                        <input type="checkbox" checked={checked} onChange={(e) => {
-                          setLocalCategories((prev) => {
-                            if (e.target.checked) return [...prev, cat];
-                            return prev.filter((c) => c !== cat);
-                          });
-                        }} />
-                        <span className="text-sm">{cat}</span>
-                      </label>
-                    );
-                  })}
-                </div>
-                <div className="mt-4 flex gap-2">
-                  <button onClick={() => { setCategoryModalOpen(false); }} className="flex-1 py-2 bg-slate-200 rounded-lg">Cerrar</button>
-                  <button onClick={() => { if (localCategories.length === 0) setLocalCategories(['Alimentos']); setLocalCategory(localCategories[0] ?? 'Alimentos'); setCategoryModalOpen(false); }} className="flex-1 py-2 bg-sky-600 text-white rounded-lg">Usar</button>
-                </div>
-              </div>
-            </div>
-          )}
+          {/* Modal de categorías eliminado (sistema unificado de palabras) */}
           {/* Settings modal */}
           {settingsModalOpen && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-sm p-6`}>
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 animate-fade-in">
+              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-sm p-6 animate-pop-in`}>
                 <h3 className="text-lg font-semibold mb-4">Configuraciones de sala</h3>
                 <div className="space-y-4">
                   <div>
                     <label className="text-xs text-slate-400">Impostores</label>
                     <div className="flex items-center gap-2 mt-1">
-                      <button onClick={() => setLocalImpostorCount(Math.max(1, localImpostorCount - 1))} className="px-2 py-1 bg-slate-200 rounded">-</button>
+                      <button onClick={() => setLocalImpostorCount(Math.max(1, localImpostorCount - 1))} className={`px-2 py-1 rounded ${darkMode ? 'bg-slate-700 hover:bg-slate-600 text-slate-100' : 'bg-slate-200 hover:bg-slate-300'}`}>-</button>
                       <span className="flex-1 text-center">{localImpostorCount}</span>
-                      <button onClick={() => setLocalImpostorCount(Math.min(3, localImpostorCount + 1))} className="px-2 py-1 bg-slate-200 rounded">+</button>
+                      <button onClick={() => setLocalImpostorCount(Math.min(3, localImpostorCount + 1))} className={`px-2 py-1 rounded ${darkMode ? 'bg-slate-700 hover:bg-slate-600 text-slate-100' : 'bg-slate-200 hover:bg-slate-300'}`}>+</button>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-400">Impostor oculto</label>
+                    <div className="mt-1 flex items-center justify-between">
+                      <span className="text-xs opacity-70 mr-2">El impostor cree ser civil y recibe palabra distinta</span>
+                      <button onClick={() => setLocalHiddenImpostor(v => !v)} className={`relative w-12 h-6 rounded-full transition-colors ${localHiddenImpostor ? 'bg-emerald-500' : (darkMode ? 'bg-slate-600' : 'bg-slate-300')}`}> 
+                        <span className={`absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${localHiddenImpostor ? 'translate-x-6' : 'translate-x-0'}`}></span>
+                      </button>
                     </div>
                   </div>
                   <div>
                     <label className="text-xs text-slate-400">Tiempo por turno (s)</label>
                     <div className="flex items-center gap-2 mt-1">
-                      <button onClick={() => setLocalTurnTime(Math.max(10, localTurnTime - 10))} className="px-2 py-1 bg-slate-200 rounded">-</button>
+                      <button onClick={() => setLocalTurnTime(Math.max(10, localTurnTime - 10))} className={`px-2 py-1 rounded ${darkMode ? 'bg-slate-700 hover:bg-slate-600 text-slate-100' : 'bg-slate-200 hover:bg-slate-300'}`}>-</button>
                       <span className="flex-1 text-center">{localTurnTime}</span>
-                      <button onClick={() => setLocalTurnTime(Math.min(120, localTurnTime + 10))} className="px-2 py-1 bg-slate-200 rounded">+</button>
+                      <button onClick={() => setLocalTurnTime(Math.min(120, localTurnTime + 10))} className={`px-2 py-1 rounded ${darkMode ? 'bg-slate-700 hover:bg-slate-600 text-slate-100' : 'bg-slate-200 hover:bg-slate-300'}`}>+</button>
                     </div>
                   </div>
                   <div>
                     <label className="text-xs text-slate-400">Tiempo de votación (s)</label>
                     <div className="flex items-center gap-2 mt-1">
-                      <button onClick={() => setLocalVoteTime(Math.max(10, localVoteTime - 10))} className="px-2 py-1 bg-slate-200 rounded">-</button>
+                      <button onClick={() => setLocalVoteTime(Math.max(10, localVoteTime - 10))} className={`px-2 py-1 rounded ${darkMode ? 'bg-slate-700 hover:bg-slate-600 text-slate-100' : 'bg-slate-200 hover:bg-slate-300'}`}>-</button>
                       <span className="flex-1 text-center">{localVoteTime}</span>
-                      <button onClick={() => setLocalVoteTime(Math.min(120, localVoteTime + 10))} className="px-2 py-1 bg-slate-200 rounded">+</button>
+                      <button onClick={() => setLocalVoteTime(Math.min(120, localVoteTime + 10))} className={`px-2 py-1 rounded ${darkMode ? 'bg-slate-700 hover:bg-slate-600 text-slate-100' : 'bg-slate-200 hover:bg-slate-300'}`}>+</button>
                     </div>
                   </div>
                   <div>
                     <label className="text-xs text-slate-400">Tiempo de discusión (s)</label>
                     <div className="flex items-center gap-2 mt-1">
-                      <button onClick={() => setLocalDiscussionTime(Math.max(5, localDiscussionTime - 5))} className="px-2 py-1 bg-slate-200 rounded">-</button>
+                      <button onClick={() => setLocalDiscussionTime(Math.max(5, localDiscussionTime - 5))} className={`px-2 py-1 rounded ${darkMode ? 'bg-slate-700 hover:bg-slate-600 text-slate-100' : 'bg-slate-200 hover:bg-slate-300'}`}>-</button>
                       <span className="flex-1 text-center">{localDiscussionTime}</span>
-                      <button onClick={() => setLocalDiscussionTime(Math.min(180, localDiscussionTime + 5))} className="px-2 py-1 bg-slate-200 rounded">+</button>
+                      <button onClick={() => setLocalDiscussionTime(Math.min(180, localDiscussionTime + 5))} className={`px-2 py-1 rounded ${darkMode ? 'bg-slate-700 hover:bg-slate-600 text-slate-100' : 'bg-slate-200 hover:bg-slate-300'}`}>+</button>
                     </div>
                   </div>
-                  <div>
-                    <label className="text-xs text-slate-400">Categorías de palabras</label>
-                    <button onClick={() => { setCategoryModalOpen(true); setSettingsModalOpen(false); }} className="w-full mt-1 p-2 bg-slate-100 rounded text-left">
-                      {localCategories.length === allCategoryKeys.length ? 'Todas las categorías' : localCategories.length === 1 ? localCategories[0] : `${localCategories.length} seleccionadas`}
-                    </button>
-                  </div>
+                  {/* Categorías eliminadas en nuevo modelo */}
                 </div>
                 <div className="mt-6 flex gap-2">
-                  <button onClick={() => setSettingsModalOpen(false)} className="flex-1 py-2 bg-slate-200 rounded-lg">Cancelar</button>
+                  <button onClick={() => setSettingsModalOpen(false)} className={`flex-1 py-2 rounded-lg ${darkMode ? 'bg-slate-700 text-slate-100 hover:bg-slate-600' : 'bg-slate-200'}`}>Cancelar</button>
                   <button type="button" onClick={() => {
-                    handleUpdateSettings({ impostorCount: localImpostorCount, turnTimeSeconds: localTurnTime, voteTimeSeconds: localVoteTime, discussionTimeSeconds: localDiscussionTime, category: localCategory, categories: localCategories });
+                    handleUpdateSettings({ impostorCount: localImpostorCount, turnTimeSeconds: localTurnTime, voteTimeSeconds: localVoteTime, discussionTimeSeconds: localDiscussionTime, hiddenImpostor: localHiddenImpostor });
                     setSettingsModalOpen(false);
                   }} className="flex-1 py-2 bg-sky-600 text-white rounded-lg">Guardar</button>
                 </div>
@@ -1106,8 +1519,8 @@ export default function App() {
           )}
           {/* End game modal */}
           {state && state.phase === 'ENDED' && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-              <div className="bg-white rounded-2xl shadow-lg w-full max-w-md p-6 text-center transition-all duration-400">
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 animate-fade-in">
+              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-md p-6 text-center animate-pop-in`}> 
                 {(() => {
                   const impostoresVivos = state.players.filter((p) => p.role === 'IMPOSTOR' && p.alive).length;
                   const victoriaCiviles = impostoresVivos === 0;

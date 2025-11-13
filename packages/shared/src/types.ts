@@ -25,9 +25,11 @@ export interface GameState {
     discussionTimeSeconds?: number;
     category?: string; // backward compat (single)
     categories?: string[]; // new multi-select support
+    hiddenImpostor?: boolean; // si true, el impostor recibe un rol civil y una palabra alternativa
   };
   // location is intentionally optional in GAME_STATE; server may send it privately to crewmates
   location?: string | null; // e.g. "Submarino"
+  category?: string | null; // categoría asociada a la palabra (visible para todos)
   impostorId?: PlayerID | null;
   // support for multiple impostors (optional)
   impostorIds?: PlayerID[];
@@ -43,7 +45,7 @@ export interface ServerToClientEvents {
   JOINED_ROOM: (roomId: RoomID, state: GameState) => void;
   GAME_STATE: (state: GameState) => void;
   // Sent privately to crewmates only containing the secret location
-  PRIVATE_LOCATION: (location: string) => void;
+  PRIVATE_LOCATION: (location: string, category?: string | null) => void;
   // Notifies clients of the current turn (player id)
   CURRENT_TURN: (playerId: PlayerID) => void;
   // Broadcast when a word is submitted in the room
@@ -56,6 +58,8 @@ export interface ServerToClientEvents {
   START_VOTING: () => void;
   // Live voting progress during VOTING phase
   VOTE_PROGRESS: (votes: Array<{ voterId: PlayerID; targetId: PlayerID | null }>) => void;
+  // All votes are in; client may show a countdown before reveal
+  VOTING_COMPLETE: (seconds: number) => void;
   // Live vote intent (pre-confirmation selection)
   VOTE_INTENT_STATE: (intents: Array<{ voterId: PlayerID; targetId: PlayerID | null }>) => void;
   // Poll to decide whether to start voting or continue discussion (includes detailed votes; removed countdown)
@@ -75,7 +79,7 @@ export interface ClientToServerEvents {
   JOIN_ROOM: (roomId: RoomID, name: string) => void;
   START_GAME: (roomId: RoomID) => void;
   // Owner can update room settings
-  UPDATE_SETTINGS: (roomId: RoomID, settings: { impostorCount?: number; turnTimeSeconds?: number; voteTimeSeconds?: number; discussionTimeSeconds?: number; category?: string; categories?: string[] }) => void;
+  UPDATE_SETTINGS: (roomId: RoomID, settings: { impostorCount?: number; turnTimeSeconds?: number; voteTimeSeconds?: number; discussionTimeSeconds?: number; category?: string; categories?: string[]; hiddenImpostor?: boolean }) => void;
   // Owner can kick a player before the game starts
   KICK_PLAYER: (roomId: RoomID, playerId: PlayerID) => void;
   ASK_QUESTION: (roomId: RoomID, text: string) => void;
