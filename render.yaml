@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: impostor-server
+    env: node
+    plan: free
+    region: oregon
+    root: .
+    buildCommand: |
+      npm install
+      npm --workspace=@impostor/shared run build
+      npm --workspace=@impostor/server run build
+    startCommand: node packages/server/dist/index.js
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: NPM_FLAGS
+        value: --legacy-peer-deps
