@@ -26,6 +26,7 @@ export interface GameState {
     category?: string; // backward compat (single)
     categories?: string[]; // new multi-select support
     hiddenImpostor?: boolean; // si true, el impostor recibe un rol civil y una palabra alternativa
+    hideCategory?: boolean; // si true, la categoría NO se muestra a nadie durante la partida
   };
   // location is intentionally optional in GAME_STATE; server may send it privately to crewmates
   location?: string | null; // e.g. "Submarino"
@@ -79,7 +80,9 @@ export interface ClientToServerEvents {
   JOIN_ROOM: (roomId: RoomID, name: string) => void;
   START_GAME: (roomId: RoomID) => void;
   // Owner can update room settings
-  UPDATE_SETTINGS: (roomId: RoomID, settings: { impostorCount?: number; turnTimeSeconds?: number; voteTimeSeconds?: number; discussionTimeSeconds?: number; category?: string; categories?: string[]; hiddenImpostor?: boolean }) => void;
+  // Reiniciar la sala al estado de lobby manteniendo jugadores (post-partida)
+  RESET_LOBBY: (roomId: RoomID) => void;
+  UPDATE_SETTINGS: (roomId: RoomID, settings: { impostorCount?: number; turnTimeSeconds?: number; voteTimeSeconds?: number; discussionTimeSeconds?: number; category?: string; categories?: string[]; hiddenImpostor?: boolean; hideCategory?: boolean }) => void;
   // Owner can kick a player before the game starts
   KICK_PLAYER: (roomId: RoomID, playerId: PlayerID) => void;
   ASK_QUESTION: (roomId: RoomID, text: string) => void;

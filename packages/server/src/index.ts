@@ -79,7 +79,7 @@ io.on('connection', (socket) => {
       impostorId: null,
       ownerId: playerId,
       // default settings
-      settings: { impostorCount: 1, turnTimeSeconds: 20, voteTimeSeconds: 30, discussionTimeSeconds: 20 },
+  settings: { impostorCount: 1, turnTimeSeconds: 20, voteTimeSeconds: 30, discussionTimeSeconds: 20, hiddenImpostor: false, hideCategory: false } as any,
       phase: 'LOBBY',
       roundNumber: 0,
       createdAt: Date.now(),
@@ -142,7 +142,8 @@ io.on('connection', (socket) => {
     const pair = wordPairs[Math.floor(Math.random() * wordPairs.length)];
     const chosenCategory = pair.category;
     const location = pair.civilian;
-  const hiddenMode = !!(state.settings as any)?.hiddenImpostor;
+    const hiddenMode = !!(state.settings as any)?.hiddenImpostor;
+    const hideCategory = !!(state.settings as any)?.hideCategory;
     let impostorAlt: string | null = null;
     if (hiddenMode) {
       impostorAlt = pair.impostor !== location ? pair.impostor : location;
@@ -151,7 +152,7 @@ io.on('connection', (socket) => {
   // Assign roles (support multiple impostors)
   state.players = state.players.map((p: Player) => ({ ...p, role: state.impostorIds?.includes(p.id) ? 'IMPOSTOR' : 'CREWMATE' }));
   state.phase = 'IN_GAME';
-  (state as any).category = chosenCategory;
+  (state as any).category = hideCategory ? null : chosenCategory;
   state.roundNumber = 1;
 
     rooms.set(roomId, state);
@@ -165,14 +166,14 @@ io.on('connection', (socket) => {
     for (const p of state.players) {
       if (!p.socketId) continue;
       if (p.role === 'CREWMATE') {
-        io.to(p.socketId).emit('PRIVATE_LOCATION', location, chosenCategory);
+  io.to(p.socketId).emit('PRIVATE_LOCATION', location, hideCategory ? null : chosenCategory);
         io.to(p.socketId).emit('PLAYER_INFO', p.id, 'CREWMATE', location);
       } else if (p.role === 'IMPOSTOR') {
         if (hiddenMode) {
-          io.to(p.socketId).emit('PRIVATE_LOCATION', impostorAlt!, chosenCategory);
+          io.to(p.socketId).emit('PRIVATE_LOCATION', impostorAlt!, hideCategory ? null : chosenCategory);
           io.to(p.socketId).emit('PLAYER_INFO', p.id, 'CREWMATE', impostorAlt!);
         } else {
-          io.to(p.socketId).emit('PRIVATE_LOCATION', '', chosenCategory); // sólo categoría
+          io.to(p.socketId).emit('PRIVATE_LOCATION', '', hideCategory ? null : chosenCategory); // sólo categoría (si no está oculta)
           io.to(p.socketId).emit('PLAYER_INFO', p.id, 'IMPOSTOR', null);
         }
       }
@@ -189,7 +190,7 @@ io.on('connection', (socket) => {
   });
 
   // owner can update settings in lobby (supports multi-categoría y discusión)
-  socket.on('UPDATE_SETTINGS', (roomId: RoomID, settings: { impostorCount?: number; turnTimeSeconds?: number; voteTimeSeconds?: number; discussionTimeSeconds?: number; category?: string; categories?: string[] }) => {
+  socket.on('UPDATE_SETTINGS', (roomId: RoomID, settings: { impostorCount?: number; turnTimeSeconds?: number; voteTimeSeconds?: number; discussionTimeSeconds?: number; category?: string; categories?: string[]; hiddenImpostor?: boolean; hideCategory?: boolean }) => {
     const state = rooms.get(roomId);
     if (!state) return socket.emit('ERROR', 'ROOM_NOT_FOUND');
     const me = state.players.find((p) => p.socketId === socket.id);
@@ -433,8 +434,7 @@ io.on('connection', (socket) => {
           st.phase = 'ENDED';
           rooms.set(roomId, st);
           io.to(roomId).emit('GAME_STATE', { ...st, location: null });
-          rooms.delete(roomId);
-          roomMeta.delete(roomId);
+          // mantener la sala para reinicio manual
           return;
         }
         const victim = st.players.find((p: Player) => p.id === eliminated);
@@ -448,8 +448,7 @@ io.on('connection', (socket) => {
           st.phase = 'ENDED';
           rooms.set(roomId, st);
           io.to(roomId).emit('GAME_STATE', { ...st, location: null });
-          rooms.delete(roomId);
-          roomMeta.delete(roomId);
+          // mantener la sala para reinicio manual
           return;
         }
         // continue next round
@@ -506,6 +505,28 @@ io.on('connection', (socket) => {
         io.to(roomId).emit('GAME_STATE', state);
       }
     }
+  });
+
+  // Reiniciar sala al lobby manteniendo jugadores
+  (socket as any).on('RESET_LOBBY', (roomId: RoomID) => {
+    const st = rooms.get(roomId);
+    if (!st) return socket.emit('ERROR', 'ROOM_NOT_FOUND');
+    // only owner can reset
+    const me = st.players.find(p => p.socketId === socket.id);
+    if (st.ownerId !== me?.id) return socket.emit('ERROR', 'NOT_ALLOWED');
+    if (st.phase !== 'ENDED') return socket.emit('ERROR', 'INVALID_PHASE');
+    // limpiar meta
+    roomMeta.delete(roomId);
+    // restaurar jugadores
+    st.players = st.players.map(p => ({ ...p, alive: true, role: undefined }));
+    st.impostorId = null;
+    st.impostorIds = [];
+    (st as any).category = null;
+    st.location = null;
+    st.phase = 'LOBBY';
+    st.roundNumber = 0;
+    rooms.set(roomId, st);
+    io.to(roomId).emit('GAME_STATE', st);
   });
 });
 

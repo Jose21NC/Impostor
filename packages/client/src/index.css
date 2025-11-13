@@ -51,3 +51,27 @@ button { touch-action: manipulation; }
 }
 .animate-fade-in { animation: fadeIn 160ms ease-out both; }
 .animate-pop-in { animation: popIn 180ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+/* Más animaciones para dar énfasis */
+@keyframes dramaticPop {
+  0% { transform: scale(0.8) rotate(-2deg); filter: blur(4px); opacity: 0 }
+  60% { transform: scale(1.05) rotate(1deg); filter: blur(0); opacity: 1 }
+  100% { transform: scale(1) rotate(0deg); }
+}
+@keyframes slideUp {
+  0% { transform: translateY(30px); opacity: 0 }
+  100% { transform: translateY(0); opacity: 1 }
+}
+@keyframes pulseGlow {
+  0%,100% { box-shadow: 0 0 0 0 rgba(99,102,241,0.6); }
+  50% { box-shadow: 0 0 0 12px rgba(99,102,241,0); }
+}
+@keyframes countdownPop {
+  0% { transform: scale(0.4); opacity:0; filter: blur(6px) }
+  70% { transform: scale(1.08); opacity:1; filter: blur(0) }
+  100% { transform: scale(1); }
+}
+.animate-dramatic-pop { animation: dramaticPop 420ms cubic-bezier(.21,1.02,.73,1) both; }
+.animate-slide-up { animation: slideUp 260ms cubic-bezier(.25,.8,.25,1) both; }
+.animate-pulse-glow { animation: pulseGlow 2.4s ease-in-out infinite; }
+.animate-countdown-pop { animation: countdownPop 480ms cubic-bezier(.19,1,.22,1) both; }

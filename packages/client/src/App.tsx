@@ -50,6 +50,7 @@ export default function App() {
   const [localVoteTime, setLocalVoteTime] = useState(30);
   const [localDiscussionTime, setLocalDiscussionTime] = useState(20);
   const [localHiddenImpostor, setLocalHiddenImpostor] = useState(false);
+  const [localHideCategory, setLocalHideCategory] = useState(false);
 
   // Sync local settings with state
   useEffect(() => {
@@ -59,6 +60,7 @@ export default function App() {
   setLocalVoteTime(state.settings.voteTimeSeconds ?? 30);
   setLocalDiscussionTime(state.settings.discussionTimeSeconds ?? 20);
       setLocalHiddenImpostor(state.settings.hiddenImpostor ?? false);
+  setLocalHideCategory(state.settings.hideCategory ?? false);
     }
   }, [state?.settings]);
 
@@ -771,7 +773,7 @@ export default function App() {
     socket.emit('START_GAME', roomId);
   }
 
-  function handleUpdateSettings(settings: { impostorCount?: number; turnTimeSeconds?: number; voteTimeSeconds?: number; discussionTimeSeconds?: number; category?: string; categories?: string[]; hiddenImpostor?: boolean }) {
+  function handleUpdateSettings(settings: { impostorCount?: number; turnTimeSeconds?: number; voteTimeSeconds?: number; discussionTimeSeconds?: number; category?: string; categories?: string[]; hiddenImpostor?: boolean; hideCategory?: boolean }) {
     if (!roomId) return;
     socket.emit('UPDATE_SETTINGS', roomId, settings);
   }
@@ -1058,7 +1060,7 @@ export default function App() {
                       let role = revealedRole ?? (me?.role as Role | undefined) ?? null;
                       const hidden = state.settings?.hiddenImpostor;
                       if (hidden && role === 'IMPOSTOR') role = 'CREWMATE';
-                      const catShown = secretCategory ?? state?.category ?? null;
+                      const catShown = state?.settings?.hideCategory ? null : (secretCategory ?? state?.category ?? null);
                       const wordEffective = revealedLocation ?? secretLocation ?? null;
                       if (role === 'CREWMATE') {
                         return <div className="text-xs opacity-80">Categoría: <span className="font-medium">{catShown ?? '—'}</span> · Palabra: <span className="font-medium">{wordEffective ?? '—'}</span></div>;
@@ -1197,7 +1199,7 @@ export default function App() {
               {/* Modal de votación emergente */}
               {votingOpen && state && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 animate-fade-in">
-                  <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-sm p-6 animate-pop-in`}>
+                  <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-sm p-6 animate-dramatic-pop`}>
                     <div className="text-lg font-semibold mb-1">Vota por un jugador</div>
                     {(() => {
                       const alive = state.players.filter((p: Player) => p.alive).length;
@@ -1346,7 +1348,7 @@ export default function App() {
           {/* Create room confirmation modal */}
           {createConfirmOpen && roomId && (
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 animate-fade-in">
-              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-sm p-6 text-center animate-pop-in`}>
+              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-sm p-6 text-center animate-dramatic-pop`}>
                 <div className="text-lg font-semibold mb-2">Sala creada</div>
                 <div className={`text-sm ${darkMode ? 'text-slate-400' : 'text-slate-500'} mb-3`}>Comparte este código con tus amigos:</div>
                 <div className="text-4xl font-extrabold tracking-widest mb-4">{roomId}</div>
@@ -1366,7 +1368,7 @@ export default function App() {
           {/* Join room confirmation modal */}
           {joinConfirmOpen && roomId && (
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 animate-fade-in">
-              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-sm p-6 text-center animate-pop-in`}>
+              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-sm p-6 text-center animate-dramatic-pop`}>
                 <div className="text-lg font-semibold mb-2">Te uniste a la sala</div>
                 <div className="text-3xl font-extrabold tracking-widest mb-3">{roomId}</div>
                 <div className={`text-xs ${darkMode ? 'text-slate-400' : 'text-slate-500'} mb-4`}>Espera al dueño para iniciar el juego</div>
@@ -1389,7 +1391,7 @@ export default function App() {
           {/* Reveal modal */}
           {revealOpen && (
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 animate-fade-in">
-              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-sm p-6 text-center animate-pop-in`}> 
+              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-sm p-6 text-center animate-dramatic-pop`}> 
                 {countdown > 0 ? (
                   <div>
                     <div className="text-sm text-slate-500 mb-2">Preparando rol...</div>
@@ -1422,7 +1424,7 @@ export default function App() {
           {/* Round-end poll modal (todos los jugadores pueden decidir) */}
           {pollOpen && ((state && state.phase === 'ROUND_END') || roundEnded) && state && (
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 animate-fade-in">
-              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-sm p-6 text-center animate-pop-in`}>
+              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-sm p-6 text-center animate-dramatic-pop`}>
                 <div className="text-lg font-semibold mb-2">Fin de ronda</div>
                 <div className={`text-sm ${darkMode ? 'text-slate-300' : 'text-slate-500'} mb-4`}>¿Qué desean hacer ahora?</div>
                 <div className="grid grid-cols-2 gap-2 mb-3">
@@ -1480,7 +1482,7 @@ export default function App() {
           {/* Settings modal */}
           {settingsModalOpen && (
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 animate-fade-in">
-              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-sm p-6 animate-pop-in`}>
+              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-sm p-6 animate-dramatic-pop`}>
                 <h3 className="text-lg font-semibold mb-4">Configuraciones de sala</h3>
                 <div className="space-y-4">
                   <div>
@@ -1497,6 +1499,15 @@ export default function App() {
                       <span className="text-xs opacity-70 mr-2">El impostor cree ser civil y recibe palabra distinta</span>
                       <button onClick={() => setLocalHiddenImpostor(v => !v)} className={`relative w-12 h-6 rounded-full transition-colors ${localHiddenImpostor ? 'bg-emerald-500' : (darkMode ? 'bg-slate-600' : 'bg-slate-300')}`}> 
                         <span className={`absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${localHiddenImpostor ? 'translate-x-6' : 'translate-x-0'}`}></span>
+                      </button>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-400">Ocultar categoría</label>
+                    <div className="mt-1 flex items-center justify-between">
+                      <span className="text-xs opacity-70 mr-2">No muestra la categoría durante la partida</span>
+                      <button onClick={() => setLocalHideCategory(v => !v)} className={`relative w-12 h-6 rounded-full transition-colors ${localHideCategory ? 'bg-amber-500' : (darkMode ? 'bg-slate-600' : 'bg-slate-300')}`}> 
+                        <span className={`absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${localHideCategory ? 'translate-x-6' : 'translate-x-0'}`}></span>
                       </button>
                     </div>
                   </div>
@@ -1529,7 +1540,7 @@ export default function App() {
                 <div className="mt-6 flex gap-2">
                   <button onClick={() => setSettingsModalOpen(false)} className={`flex-1 py-2 rounded-lg ${darkMode ? 'bg-slate-700 text-slate-100 hover:bg-slate-600' : 'bg-slate-200'}`}>Cancelar</button>
                   <button type="button" onClick={() => {
-                    handleUpdateSettings({ impostorCount: localImpostorCount, turnTimeSeconds: localTurnTime, voteTimeSeconds: localVoteTime, discussionTimeSeconds: localDiscussionTime, hiddenImpostor: localHiddenImpostor });
+                    handleUpdateSettings({ impostorCount: localImpostorCount, turnTimeSeconds: localTurnTime, voteTimeSeconds: localVoteTime, discussionTimeSeconds: localDiscussionTime, hiddenImpostor: localHiddenImpostor, hideCategory: localHideCategory });
                     setSettingsModalOpen(false);
                   }} className="flex-1 py-2 bg-sky-600 text-white rounded-lg">Guardar</button>
                 </div>
@@ -1539,7 +1550,7 @@ export default function App() {
           {/* End game modal */}
           {state && state.phase === 'ENDED' && (
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 animate-fade-in">
-              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-md p-6 text-center animate-pop-in`}> 
+              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-md p-6 text-center animate-dramatic-pop`}> 
                 {(() => {
                   const impostoresVivos = state.players.filter((p) => p.role === 'IMPOSTOR' && p.alive).length;
                   const victoriaCiviles = impostoresVivos === 0;
@@ -1558,8 +1569,9 @@ export default function App() {
                     </div>
                   ))}
                 </div>
-                <div>
-                  <button type="button" onClick={() => { setState(null); setRoomId(null); }} className="px-4 py-2 bg-sky-600 text-white rounded-lg">Volver al lobby</button>
+                <div className="flex flex-col gap-2">
+                  <button type="button" onClick={() => { if (state) socket.emit('RESET_LOBBY', state.roomId); }} className="px-4 py-2 bg-sky-600 text-white rounded-lg">Volver al lobby</button>
+                  <button type="button" onClick={() => { setState(null); setRoomId(null); setLogs([]); }} className="px-4 py-2 bg-slate-200 rounded-lg text-slate-800">Salir de la sala</button>
                 </div>
               </div>
             </div>
