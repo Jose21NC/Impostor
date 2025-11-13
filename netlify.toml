@@ -1,6 +1,9 @@
 [build]
   command = "npm run build"
   publish = "packages/client/dist"
+  # Opcional: puedes definir una condición de ignorar builds usando un comando shell
+  # Ejemplo (descomenta y ajusta si quieres que sólo reconstruya cuando cambie el cliente):
+  # ignore = "bash -lc 'git diff --quiet $CACHED_COMMIT_REF $COMMIT_REF -- packages/client packages/shared'"
 
 # Monorepo: aseguramos que Netlify ejecute en la raíz del repo
 [build.environment]
@@ -21,8 +24,7 @@
   VITE_SOUND_ROLE_REVEAL_IMPOSTOR_URL = "" # URL reveal impostor
 
 # Ignorar reconstrucción si sólo cambian archivos del servidor (no afecta cliente)
-[build.ignore]
-  files = ["packages/server/**", "packages/shared/**/README.md"]
+# Nota: La clave [build.ignore] con 'files' no es válida en Netlify. Usa la clave 'ignore' como string arriba si la necesitas.
 
 # Headers para permitir WebSockets (aunque Netlify sólo sirve el cliente; el backend externo debe soportar CORS correctos)
 [[headers]]
