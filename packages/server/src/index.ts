@@ -11,7 +11,7 @@ import {
   Role,
   ServerToClientEvents,
   ClientToServerEvents,
-  wordCategories,
+  wordPairs,
 } from '@impostor/shared';
 
 const app = express();
@@ -136,22 +136,22 @@ io.on('connection', (socket) => {
     state.impostorIds = chosen;
     state.impostorId = chosen[0] ?? null;
 
-    // Asignar palabra secreta desde categorías seleccionadas (multi o single)
-    const selected = (state.settings?.categories && state.settings.categories.length > 0)
-      ? state.settings.categories
-      : [state.settings?.category ?? 'Alimentos'];
-    const pool: string[] = [];
-    for (const c of selected) {
-      const arr = wordCategories[c as keyof typeof wordCategories];
-      if (Array.isArray(arr)) pool.push(...arr);
+    // Asignar palabra secreta seleccionando primero una categoría al azar entre las elegidas,
+    // para no sesgar por categorías con más palabras.
+    // Selección directa de un par
+    const pair = wordPairs[Math.floor(Math.random() * wordPairs.length)];
+    const chosenCategory = pair.category;
+    const location = pair.civilian;
+  const hiddenMode = !!(state.settings as any)?.hiddenImpostor;
+    let impostorAlt: string | null = null;
+    if (hiddenMode) {
+      impostorAlt = pair.impostor !== location ? pair.impostor : location;
     }
-    const fallback = wordCategories['Alimentos'];
-    const effectivePool = pool.length > 0 ? pool : fallback;
-    const location = effectivePool[Math.floor(Math.random() * effectivePool.length)];
 
   // Assign roles (support multiple impostors)
   state.players = state.players.map((p: Player) => ({ ...p, role: state.impostorIds?.includes(p.id) ? 'IMPOSTOR' : 'CREWMATE' }));
   state.phase = 'IN_GAME';
+  (state as any).category = chosenCategory;
   state.roundNumber = 1;
 
     rooms.set(roomId, state);
@@ -161,23 +161,25 @@ io.on('connection', (socket) => {
     const startIndex = Math.floor(Math.random() * order.length);
     roomMeta.set(roomId, { location, turnOrder: order, currentTurnIndex: startIndex, submittedThisRound: new Set(), words: [], votes: new Map() });
 
-    // Send private location to crewmates only
+    // En modo oculto enviamos palabra alternativa al impostor y rol civil
     for (const p of state.players) {
-      if (p.role === 'CREWMATE' && p.socketId) {
-        io.to(p.socketId).emit('PRIVATE_LOCATION', location);
-      }
-    }
-
-    // Send explicit player info (role + optional location) privately to each player
-    for (const p of state.players) {
-      if (p.socketId) {
-        const loc = p.role === 'CREWMATE' ? location : null;
-        io.to(p.socketId).emit('PLAYER_INFO', p.id, p.role, loc);
+      if (!p.socketId) continue;
+      if (p.role === 'CREWMATE') {
+        io.to(p.socketId).emit('PRIVATE_LOCATION', location, chosenCategory);
+        io.to(p.socketId).emit('PLAYER_INFO', p.id, 'CREWMATE', location);
+      } else if (p.role === 'IMPOSTOR') {
+        if (hiddenMode) {
+          io.to(p.socketId).emit('PRIVATE_LOCATION', impostorAlt!, chosenCategory);
+          io.to(p.socketId).emit('PLAYER_INFO', p.id, 'CREWMATE', impostorAlt!);
+        } else {
+          io.to(p.socketId).emit('PRIVATE_LOCATION', '', chosenCategory); // sólo categoría
+          io.to(p.socketId).emit('PLAYER_INFO', p.id, 'IMPOSTOR', null);
+        }
       }
     }
 
     // Broadcast sanitized game state (without location)
-    const broadcastState = { ...state, location: null };
+  const broadcastState = { ...state, location: null };
     io.to(roomId).emit('GAME_STATE', broadcastState as GameState);
 
     // Notify current turn
@@ -393,78 +395,79 @@ io.on('connection', (socket) => {
     const me = state.players.find((p) => p.socketId === socket.id);
     const voter = me?.id;
     if (!voter) return socket.emit('ERROR', 'NOT_ALLOWED');
-    // must be alive to vote
-  const voterPlayer = state.players.find((p: Player) => p.id === voter);
+    const voterPlayer = state.players.find((p: Player) => p.id === voter);
     if (!voterPlayer || !voterPlayer.alive) return socket.emit('ERROR', 'NOT_ALLOWED_TO_VOTE');
+
+    // record vote
     meta.votes.set(voter, targetId);
     // emit live progress
-  const progress: Array<{ voterId: PlayerID; targetId: PlayerID | null }> = [];
-  for (const [vid, tid] of meta.votes.entries()) progress.push({ voterId: vid, targetId: tid ?? null });
+    const progress: Array<{ voterId: PlayerID; targetId: PlayerID | null }> = [];
+    for (const [vid, tid] of meta.votes.entries()) progress.push({ voterId: vid, targetId: tid ?? null });
     io.to(roomId).emit('VOTE_PROGRESS', progress);
-    // once a vote is confirmed, reflect it in intents too
-    if (meta.voteIntents) {
-      meta.voteIntents.set(voter, targetId);
-      const intents: Array<{ voterId: PlayerID; targetId: PlayerID | null }> = [];
-      for (const [vid, tid] of meta.voteIntents.entries()) intents.push({ voterId: vid, targetId: tid ?? null });
-      io.to(roomId).emit('VOTE_INTENT_STATE', intents);
-    }
-    // if all alive voted, tally
-  const aliveVoters = state.players.filter((p: Player) => p.alive).length;
-    if (meta.votes.size >= aliveVoters) {
-      // tally
-      const tally = new Map<PlayerID, number>();
-      for (const t of meta.votes.values()) { if (t) tally.set(t, (tally.get(t) ?? 0) + 1); }
-      // find max
-      let maxVotes = 0;
-      let eliminated: PlayerID | null = null;
-      for (const [pid, v] of tally.entries()) {
-        if (v > maxVotes) { maxVotes = v; eliminated = pid; }
-        else if (v === maxVotes) { eliminated = null; }
-      }
-      if (eliminated) {
-  const victim = state.players.find((p: Player) => p.id === eliminated);
-        if (victim) victim.alive = false;
-      }
-      // Empate => victoria inmediata del impostor
-      if (!eliminated) {
-        io.to(roomId).emit('VOTE_RESULT', null);
-        state.phase = 'ENDED';
-        rooms.set(roomId, state);
-        io.to(roomId).emit('GAME_STATE', { ...state, location: null });
-        // eliminar sala
-        rooms.delete(roomId);
-        roomMeta.delete(roomId);
-        return;
-      }
-      io.to(roomId).emit('VOTE_RESULT', eliminated);
+    // mirror into intents as confirmed
+    if (!meta.voteIntents) meta.voteIntents = new Map();
+    meta.voteIntents.set(voter, targetId);
+    const intents: Array<{ voterId: PlayerID; targetId: PlayerID | null }> = [];
+    for (const [vid, tid] of meta.voteIntents.entries()) intents.push({ voterId: vid, targetId: tid ?? null });
+    io.to(roomId).emit('VOTE_INTENT_STATE', intents);
 
-      // check win conditions post-eliminación
-      const impostorAlive = state.players.find((p: Player) => p.role === 'IMPOSTOR' && p.alive);
-      const crewmatesAlive = state.players.filter((p: Player) => p.role === 'CREWMATE' && p.alive).length;
-      const impostorCountAlive = state.players.filter((p: Player) => p.role === 'IMPOSTOR' && p.alive).length;
-      if (!impostorAlive || crewmatesAlive <= impostorCountAlive) {
-        state.phase = 'ENDED';
-        rooms.set(roomId, state);
-        io.to(roomId).emit('GAME_STATE', { ...state, location: null });
-        rooms.delete(roomId);
-        roomMeta.delete(roomId);
-        return;
-      }
-      // continuar juego
-      meta.submittedThisRound = new Set();
-      meta.words = [];
-      meta.voteIntents = new Map();
-      if (eliminated) {
-        const idx = meta.turnOrder.indexOf(eliminated);
-        meta.currentTurnIndex = (idx + 1) % meta.turnOrder.length;
-      }
-      state.phase = 'IN_GAME';
-      state.roundNumber = (state.roundNumber ?? 1) + 1;
-      const firstAlive = state.players.find(p => p.alive);
-      if (firstAlive) meta.currentTurnIndex = meta.turnOrder.indexOf(firstAlive.id);
-      rooms.set(roomId, state);
-      io.to(roomId).emit('GAME_STATE', { ...state, location: null });
-      io.to(roomId).emit('CURRENT_TURN', meta.turnOrder[meta.currentTurnIndex]);
+    // if all alive voted, pre-reveal countdown and then resolve
+    const aliveVoters = state.players.filter((p: Player) => p.alive).length;
+    if (meta.votes.size >= aliveVoters) {
+      io.to(roomId).emit('VOTING_COMPLETE', 5);
+      setTimeout(() => {
+        const st = rooms.get(roomId);
+        const mt = roomMeta.get(roomId);
+        if (!st || !mt) return;
+        // tally
+        const tally = new Map<PlayerID, number>();
+        for (const t of mt.votes.values()) { if (t) tally.set(t, (tally.get(t) ?? 0) + 1); }
+        let maxVotes = 0;
+        let eliminated: PlayerID | null = null;
+        for (const [pid, v] of tally.entries()) {
+          if (v > maxVotes) { maxVotes = v; eliminated = pid; }
+          else if (v === maxVotes) { eliminated = null; }
+        }
+        if (!eliminated) {
+          io.to(roomId).emit('VOTE_RESULT', null);
+          st.phase = 'ENDED';
+          rooms.set(roomId, st);
+          io.to(roomId).emit('GAME_STATE', { ...st, location: null });
+          rooms.delete(roomId);
+          roomMeta.delete(roomId);
+          return;
+        }
+        const victim = st.players.find((p: Player) => p.id === eliminated);
+        if (victim) victim.alive = false;
+        io.to(roomId).emit('VOTE_RESULT', eliminated);
+        // win conditions
+        const impostorAlive = st.players.find((p: Player) => p.role === 'IMPOSTOR' && p.alive);
+        const crewmatesAlive = st.players.filter((p: Player) => p.role === 'CREWMATE' && p.alive).length;
+        const impostorCountAlive = st.players.filter((p: Player) => p.role === 'IMPOSTOR' && p.alive).length;
+        if (!impostorAlive || crewmatesAlive <= impostorCountAlive) {
+          st.phase = 'ENDED';
+          rooms.set(roomId, st);
+          io.to(roomId).emit('GAME_STATE', { ...st, location: null });
+          rooms.delete(roomId);
+          roomMeta.delete(roomId);
+          return;
+        }
+        // continue next round
+        mt.submittedThisRound = new Set();
+        mt.words = [];
+        mt.voteIntents = new Map();
+        if (eliminated) {
+          const idx = mt.turnOrder.indexOf(eliminated);
+          mt.currentTurnIndex = (idx + 1) % mt.turnOrder.length;
+        }
+        st.phase = 'IN_GAME';
+        st.roundNumber = (st.roundNumber ?? 1) + 1;
+        const firstAlive = st.players.find(p => p.alive);
+        if (firstAlive) mt.currentTurnIndex = mt.turnOrder.indexOf(firstAlive.id);
+        rooms.set(roomId, st);
+        io.to(roomId).emit('GAME_STATE', { ...st, location: null });
+        io.to(roomId).emit('CURRENT_TURN', mt.turnOrder[mt.currentTurnIndex]);
+      }, 5000);
     }
   });
 
