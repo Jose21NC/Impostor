@@ -16,14 +16,55 @@ function Avatar({ name }: { name: string }) {
 
 export default function App() {
   const [connected, setConnected] = useState(socket.connected);
+  const [netToast, setNetToast] = useState<string | null>(null);
+  const netToastTimer = useRef<number | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimer = useRef<number | null>(null);
+  const tryingRejoinRef = useRef<boolean>(false);
   useEffect(() => {
-    const onConnect = () => setConnected(true);
-    const onDisconnect = () => setConnected(false);
+    const showNetToast = (msg: string) => {
+      setNetToast(msg);
+      if (netToastTimer.current) window.clearTimeout(netToastTimer.current);
+      netToastTimer.current = window.setTimeout(() => setNetToast(null), 1800);
+    };
+  const onConnect = () => { setConnected(true); showNetToast('Reconectado'); try { playOk(); } catch {} };
+  const onDisconnect = () => { setConnected(false); showNetToast('Conexión perdida…'); try { playWarn(); } catch {} };
     socket.on('connect', onConnect);
     socket.on('disconnect', onDisconnect);
+    const onError = (message: string) => {
+      let msg = message;
+      if (message === 'RATE_LIMIT') msg = 'Muy rápido: espera un instante.';
+      if (message === 'INVALID_WORD') msg = 'La palabra debe tener entre 1 y 64 caracteres.';
+      setToast(msg);
+      try { playWarn(); } catch {}
+      if (toastTimer.current) window.clearTimeout(toastTimer.current);
+      toastTimer.current = window.setTimeout(() => setToast(null), 2200);
+    };
+    socket.on('ERROR', onError);
     return () => {
       socket.off('connect', onConnect);
       socket.off('disconnect', onDisconnect);
+      socket.off('ERROR', onError);
+    };
+  }, []);
+  // Ajuste para teclado móvil: mover contenido hacia arriba según visualViewport
+  useEffect(() => {
+    const vv = (window as any).visualViewport as VisualViewport | undefined;
+    if (!vv) return;
+    const handler = () => {
+      const offset = Math.max(0, window.innerHeight - vv.height);
+      document.documentElement.style.setProperty('--kb-offset', `${offset}px`);
+      if (offset > 0) document.body.classList.add('keyboard-open');
+      else document.body.classList.remove('keyboard-open');
+    };
+    vv.addEventListener('resize', handler);
+    vv.addEventListener('scroll', handler);
+    handler();
+    return () => {
+      vv.removeEventListener('resize', handler);
+      vv.removeEventListener('scroll', handler);
+      document.body.classList.remove('keyboard-open');
+      document.documentElement.style.removeProperty('--kb-offset');
     };
   }, []);
   const [name, setName] = useState('');
@@ -46,19 +87,32 @@ export default function App() {
   // Modal de categorías eliminado (sistema unificado de wordPairs)
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const [localImpostorCount, setLocalImpostorCount] = useState(1);
-  const [localTurnTime, setLocalTurnTime] = useState(20);
-  const [localVoteTime, setLocalVoteTime] = useState(30);
-  const [localDiscussionTime, setLocalDiscussionTime] = useState(20);
+  const [localTurnTime, setLocalTurnTime] = useState(60);
+  const [localVoteTime, setLocalVoteTime] = useState(60);
+  const [localDiscussionTime, setLocalDiscussionTime] = useState(60);
   const [localHiddenImpostor, setLocalHiddenImpostor] = useState(false);
   const [localHideCategory, setLocalHideCategory] = useState(false);
+  const settingsModalRef = useRef<HTMLDivElement | null>(null);
+  const settingsButtonRef = useRef<HTMLButtonElement | null>(null);
+  const endModalRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (settingsModalOpen) {
+      requestAnimationFrame(() => settingsModalRef.current?.focus());
+    }
+  }, [settingsModalOpen]);
+  useEffect(() => {
+    if (state?.phase === 'ENDED') {
+      requestAnimationFrame(() => endModalRef.current?.focus());
+    }
+  }, [state?.phase]);
 
   // Sync local settings with state
   useEffect(() => {
     if (state?.settings) {
       setLocalImpostorCount(state.settings.impostorCount ?? 1);
-      setLocalTurnTime(state.settings.turnTimeSeconds ?? 20);
-  setLocalVoteTime(state.settings.voteTimeSeconds ?? 30);
-  setLocalDiscussionTime(state.settings.discussionTimeSeconds ?? 20);
+    setLocalTurnTime(state.settings.turnTimeSeconds ?? 60);
+    setLocalVoteTime(state.settings.voteTimeSeconds ?? 60);
+    setLocalDiscussionTime(state.settings.discussionTimeSeconds ?? 60);
       setLocalHiddenImpostor(state.settings.hiddenImpostor ?? false);
   setLocalHideCategory(state.settings.hideCategory ?? false);
     }
@@ -67,6 +121,14 @@ export default function App() {
   useEffect(() => {
     socket.on('connect', () => {
       setLocalId(socket.id ?? null);
+      try {
+        const savedRoom = localStorage.getItem('imp:roomId');
+        const savedPlayer = localStorage.getItem('imp:playerId');
+        if (savedRoom && savedPlayer && !state) {
+          tryingRejoinRef.current = true;
+          socket.emit('REJOIN', savedRoom, savedPlayer);
+        }
+      } catch {}
     });
 
     socket.on('ROOM_CREATED', (r) => {
@@ -112,6 +174,15 @@ export default function App() {
       // Mapear el id local al player.id (no al socket.id) para permisos de dueño y turnos
       const me = s.players.find((p: Player) => p.socketId === socket.id);
       if (me) setLocalId(me.id);
+      try {
+        localStorage.setItem('imp:roomId', s.roomId);
+        if (me?.id) localStorage.setItem('imp:playerId', me.id);
+      } catch {}
+      if (tryingRejoinRef.current) {
+        setToast('Sesión restaurada');
+        try { playOk(); } catch {}
+        tryingRejoinRef.current = false;
+      }
       setLogs([ 'Te uniste a la sala' ]);
       // Mostrar modal de unión solo si NO eres el dueño (cuando creas la sala el server emite también JOINED_ROOM)
       if (!me || s.ownerId !== me.id) setJoinConfirmOpen(true);
@@ -129,6 +200,7 @@ export default function App() {
           // Llamar startRevealSequence pasando el id encontrado para evitar races con setState
           startRevealSequence(s, me?.id, playerInfo ?? undefined);
         }
+        // Cleanup listeners also limpia storage si salimos manualmente en esta vista
         // Cerrar modal de poll en cualquier fase activa distinta a ROUND_END
         if (s.phase === 'VOTING' || s.phase === 'IN_GAME' || s.phase === 'DISCUSSION') {
           setPollOpen(false);
@@ -811,6 +883,50 @@ export default function App() {
       // fallback: nada
     }
   }
+  function playOk() {
+    if (!canPlay()) return;
+    try {
+      const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+      const ctx = new AudioContext();
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = 'triangle';
+      o.frequency.value = 660;
+      g.gain.value = 0.0009 * (sfxVolume / 100);
+      o.connect(g); g.connect(ctx.destination);
+      const now = ctx.currentTime;
+      g.gain.setValueAtTime(0.0001, now);
+      g.gain.exponentialRampToValueAtTime(0.12, now + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
+      o.start(now);
+      o.frequency.setValueAtTime(660, now);
+      o.frequency.linearRampToValueAtTime(880, now + 0.12);
+      o.stop(now + 0.2);
+      setTimeout(() => ctx.close(), 300);
+    } catch {}
+  }
+  function playWarn() {
+    if (!canPlay()) return;
+    try {
+      const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+      const ctx = new AudioContext();
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = 'square';
+      o.frequency.value = 220;
+      g.gain.value = 0.0009 * (sfxVolume / 100);
+      o.connect(g); g.connect(ctx.destination);
+      const now = ctx.currentTime;
+      g.gain.setValueAtTime(0.0001, now);
+      g.gain.exponentialRampToValueAtTime(0.12, now + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
+      o.start(now);
+      o.frequency.setValueAtTime(220, now);
+      o.frequency.linearRampToValueAtTime(180, now + 0.1);
+      o.stop(now + 0.18);
+      setTimeout(() => ctx.close(), 300);
+    } catch {}
+  }
 
   function playWordSound() {
     if (!canPlay()) return;
@@ -1000,7 +1116,7 @@ export default function App() {
     }, [inputRef, value]);
     return (
       <div className="flex flex-col gap-2">
-        <input ref={inputRef} onTouchStart={(e) => e.stopPropagation()} value={value} onChange={(e) => onChange(e.target.value)} placeholder="Escribe tu palabra o pista" className={`p-2 border rounded-lg ${darkMode ? 'border-slate-700 bg-slate-800 text-slate-100' : 'border-slate-200 bg-white'}`} inputMode="text" />
+        <input ref={inputRef} onFocus={(e) => { try { e.currentTarget.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch {} }} onTouchStart={(e) => e.stopPropagation()} value={value} onChange={(e) => onChange(e.target.value)} placeholder="Escribe tu palabra o pista" className={`p-2 border rounded-lg ${darkMode ? 'border-slate-700 bg-slate-800 text-slate-100' : 'border-slate-200 bg-white'}`} inputMode="text" />
         <div className="flex gap-2">
           <button type="button" onTouchStart={() => playClick()} onClick={() => { if (value.trim()) { onSubmit(value.trim()); onChange(''); } }} className="flex-1 py-2 bg-emerald-500 text-white rounded-lg">Enviar</button>
           <button type="button" onTouchStart={() => playClick()} onClick={() => { onChange(''); onSkip(); }} className={`flex-1 py-2 rounded-lg ${darkMode ? 'bg-slate-700 text-slate-100 hover:bg-slate-600' : 'bg-slate-200'}`}>Omitir</button>
@@ -1010,12 +1126,22 @@ export default function App() {
   }
 
   return (
-  <div className={`min-h-screen p-4 ${darkMode ? 'dark-body' : 'bg-gradient-to-b from-slate-50 to-slate-100'}`}>
+  <div className={`app-root p-4 ${darkMode ? 'dark-body' : 'bg-gradient-to-b from-slate-50 to-slate-100'}`}>
         {/* Indicador de conexión backend */}
         <div className="fixed top-2 right-2 z-50 text-xs flex items-center gap-1 px-2 py-1 rounded-full shadow bg-white/80 backdrop-blur dark:bg-slate-800/80">
           <span className={`inline-block h-2.5 w-2.5 rounded-full ${connected ? 'bg-emerald-500' : 'bg-rose-500 animate-pulse'}`}></span>
           <span className="font-medium select-none">{connected ? 'Conectado' : 'Desconectado'}</span>
         </div>
+        {netToast && (
+          <div className="fixed top-10 left-1/2 -translate-x-1/2 z-[70] px-3 py-2 rounded-lg bg-black/70 text-white text-sm animate-pop-in" role="status" aria-live="polite">
+            {netToast}
+          </div>
+        )}
+        {toast && (
+          <div className="fixed top-20 left-1/2 -translate-x-1/2 z-[70] px-3 py-2 rounded-lg bg-rose-600 text-white text-sm animate-pop-in glow-rose" role="status" aria-live="polite">
+            {toast}
+          </div>
+        )}
         <main className="space-y-4">
           {/* Voting reveal countdown overlay */}
           {typeof revealCountdown === 'number' && revealCountdown > 0 && (
@@ -1093,7 +1219,7 @@ export default function App() {
                     <button type="button" onClick={() => setMenuOpen((s) => !s)} className={`px-3 py-2 rounded-lg ${darkMode ? 'bg-slate-700 text-slate-100 hover:bg-slate-600' : 'bg-slate-100 hover:bg-slate-200'}`}>⋯</button>
                     {menuOpen && (
                       <div className={`absolute right-0 mt-2 w-44 rounded-lg shadow-md p-2 ${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'}`}>
-                        <button type="button" onClick={() => { setMenuOpen(false); /* salir */ setState(null); setRoomId(null); setLogs([]); }} className="w-full text-left p-2 rounded hover:bg-slate-50">Salir de la sala</button>
+                        <button type="button" onClick={() => { setMenuOpen(false); /* salir */ try { localStorage.removeItem('imp:roomId'); localStorage.removeItem('imp:playerId'); } catch {}; setState(null); setRoomId(null); setLogs([]); }} className="w-full text-left p-2 rounded hover:bg-slate-50">Salir de la sala</button>
                         <button type="button" onClick={() => { setDarkMode((d) => !d); setMenuOpen(false); }} className="w-full text-left p-2 rounded hover:bg-slate-50">Modo oscuro: {darkMode ? 'ON' : 'OFF'}</button>
                         <button type="button" onClick={() => { const next = !soundEnabled; setSoundEnabled(next); if (!next) stopAmbient(); else if (state && ['IN_GAME','VOTING','DISCUSSION','ROUND_END'].includes(state.phase)) startAmbient(); setMenuOpen(false); }} className="w-full text-left p-2 rounded hover:bg-slate-50">Sonidos: {soundEnabled ? 'ON' : 'OFF'}</button>
                         <div className="px-2 py-1">
@@ -1106,8 +1232,18 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Chat principal: estilo tipo WhatsApp */}
-              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow p-3 flex flex-col h-[58vh]`}>
+                {/* Barra compacta de jugadores con estado de conexión */}
+                <div className={`flex gap-2 overflow-x-auto pb-1 ${darkMode ? 'text-slate-200' : 'text-slate-700'}`}>
+                  {state.players.map((p: Player) => (
+                    <div key={p.id} className="flex items-center gap-1 shrink-0 px-2 py-1 rounded-full bg-white/70 dark:bg-slate-800/70 backdrop-blur border border-white/20">
+                      <span className={`h-2 w-2 rounded-full ${p.socketId ? 'bg-emerald-500' : 'bg-rose-500 animate-pulse'}`}></span>
+                      <span className="text-xs">{p.name}</span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Chat principal: estilo tipo WhatsApp */}
+              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} glass-panel rounded-2xl shadow p-3 flex flex-col h-[58vh]`}>
                 {state?.phase !== 'IN_GAME' && (
                   <div className="flex items-center gap-2 mb-2">
                     <button
@@ -1294,28 +1430,28 @@ export default function App() {
                 </div>
               </header>
 
-              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow p-4 transition-transform duration-300 ease-out transform`}> 
+              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} glass-panel rounded-2xl shadow p-4 transition-transform duration-300 ease-out transform`}> 
                 <label className={`block text-xs ${darkMode ? 'text-slate-300' : 'text-slate-500'}`}>Tu nombre</label>
-                <input className={`w-full mt-1 p-3 rounded-lg border ${darkMode ? 'border-slate-700 bg-slate-800 text-slate-100' : 'border-slate-200 bg-white' } focus:outline-none focus:ring-2 focus:ring-sky-400`} placeholder="Ej. Ana" value={name} onChange={(e) => setName(e.target.value)} />
+                <input className={`w-full mt-1 p-3 rounded-lg border ${darkMode ? 'border-slate-700 bg-slate-800 text-slate-100' : 'border-slate-200 bg-white' } focus:outline-none focus:ring-2 focus:ring-sky-400`} placeholder="Ej. Maria José" value={name} onChange={(e) => setName(e.target.value)} onFocus={(e) => { try { e.currentTarget.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch {} }} />
 
                 <div className="mt-3">
                   <label className={`block text-xs ${darkMode ? 'text-slate-300' : 'text-slate-500'}`}>Código de sala</label>
                   <div className="flex gap-3 mt-1">
-                    <input className={`flex-1 p-3 rounded-lg border ${darkMode ? 'border-slate-700 bg-slate-800 text-slate-100' : 'border-slate-200 bg-white'} uppercase tracking-widest text-center`} placeholder="ABCD" value={room} onChange={(e) => setRoom(e.target.value)} />
-                    <button type="button" onTouchStart={() => playClick()} onClick={handleJoin} className="px-4 py-3 bg-sky-600 text-white rounded-lg shadow">Unirse</button>
+                    <input className={`flex-1 p-3 rounded-lg border ${darkMode ? 'border-slate-700 bg-slate-800 text-slate-100' : 'border-slate-200 bg-white'} uppercase tracking-widest text-center`} placeholder="ABCD" value={room} onChange={(e) => setRoom(e.target.value)} onFocus={(e) => { try { e.currentTarget.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch {} }} />
+                    <button type="button" onTouchStart={() => playClick()} onClick={handleJoin} className="px-4 py-3 bg-sky-600 text-white rounded-lg shadow glow-sky">Unirse</button>
                   </div>
                 </div>
 
                 <div className="mt-4 flex gap-3">
-                  <button type="button" onTouchStart={() => playClick()} onClick={handleCreate} className="flex-1 py-3 bg-emerald-500 text-white rounded-lg shadow">Crear sala</button>
+                  <button type="button" onTouchStart={() => playClick()} onClick={handleCreate} className="flex-1 py-3 bg-emerald-500 text-white rounded-lg shadow glow-emerald">Crear sala</button>
                   <div className="relative">
-                    <button type="button" onClick={() => setSettingsModalOpen(true)} className={`px-3 py-3 rounded-lg ${darkMode ? 'bg-slate-700 text-slate-100 hover:bg-slate-600' : 'bg-slate-100 hover:bg-slate-200'}`}>⋯</button>
+                    <button ref={settingsButtonRef} type="button" onClick={() => setSettingsModalOpen(true)} className={`px-3 py-3 rounded-lg ${darkMode ? 'bg-slate-700 text-slate-100 hover:bg-slate-600' : 'bg-slate-100 hover:bg-slate-200'}`}>⋯</button>
                   </div>
                   <button type="button" onTouchStart={() => playClick()} onClick={handleStart} disabled={!state || (roomId !== 'TEST' && state.ownerId !== localId)} className="flex-1 py-3 bg-orange-500 text-white rounded-lg shadow disabled:opacity-50">Iniciar juego</button>
                 </div>
               </div>
 
-              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow p-4 transition-transform duration-300 ease-out transform`}> 
+              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} glass-panel rounded-2xl shadow p-4 transition-transform duration-300 ease-out transform`}> 
                 <div className="flex items-center justify-between mb-3">
                   <h2 className="text-sm font-semibold">Sala</h2>
                   <div className="text-xs text-slate-400">{roomId ?? 'Sin sala'}</div>
@@ -1332,6 +1468,10 @@ export default function App() {
                         </div>
                         <div className="flex items-center gap-2">
                           <div className="text-xs text-slate-500 mr-2">{p.role ? (p.role === 'IMPOSTOR' ? '🔴' : '🟢') : ''}</div>
+                          <span className={`inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full ${p.socketId ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
+                            <span className={`h-1.5 w-1.5 rounded-full ${p.socketId ? 'bg-emerald-500' : 'bg-rose-500 animate-pulse'}`}></span>
+                            {p.socketId ? 'Conectado' : 'Desconectado'}
+                          </span>
                           {state && (roomId === 'TEST' || state.ownerId === localId) && p.id !== state.ownerId && (
                             <button type="button" onTouchStart={() => playClick()} onClick={() => handleKick(p.id)} className="text-xs px-2 py-1 bg-rose-500 text-white rounded">Expulsar</button>
                           )}
@@ -1482,7 +1622,7 @@ export default function App() {
           {/* Settings modal */}
           {settingsModalOpen && (
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 animate-fade-in">
-              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-sm p-6 animate-dramatic-pop`}>
+              <div ref={settingsModalRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Configuraciones de sala" className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-sm p-6 animate-dramatic-pop`}>
                 <h3 className="text-lg font-semibold mb-4">Configuraciones de sala</h3>
                 <div className="space-y-4">
                   <div>
@@ -1538,10 +1678,11 @@ export default function App() {
                   {/* Categorías eliminadas en nuevo modelo */}
                 </div>
                 <div className="mt-6 flex gap-2">
-                  <button onClick={() => setSettingsModalOpen(false)} className={`flex-1 py-2 rounded-lg ${darkMode ? 'bg-slate-700 text-slate-100 hover:bg-slate-600' : 'bg-slate-200'}`}>Cancelar</button>
+                  <button onClick={() => { setSettingsModalOpen(false); requestAnimationFrame(() => settingsButtonRef.current?.focus()); }} className={`flex-1 py-2 rounded-lg ${darkMode ? 'bg-slate-700 text-slate-100 hover:bg-slate-600' : 'bg-slate-200'}`}>Cancelar</button>
                   <button type="button" onClick={() => {
                     handleUpdateSettings({ impostorCount: localImpostorCount, turnTimeSeconds: localTurnTime, voteTimeSeconds: localVoteTime, discussionTimeSeconds: localDiscussionTime, hiddenImpostor: localHiddenImpostor, hideCategory: localHideCategory });
                     setSettingsModalOpen(false);
+                    requestAnimationFrame(() => settingsButtonRef.current?.focus());
                   }} className="flex-1 py-2 bg-sky-600 text-white rounded-lg">Guardar</button>
                 </div>
               </div>
@@ -1550,7 +1691,7 @@ export default function App() {
           {/* End game modal */}
           {state && state.phase === 'ENDED' && (
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 animate-fade-in">
-              <div className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-md p-6 text-center animate-dramatic-pop`}> 
+              <div ref={endModalRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Fin de partida" className={`${darkMode ? 'bg-slate-800 text-slate-100' : 'bg-white'} rounded-2xl shadow-lg w-full max-w-md p-6 text-center animate-dramatic-pop`}> 
                 {(() => {
                   const impostoresVivos = state.players.filter((p) => p.role === 'IMPOSTOR' && p.alive).length;
                   const victoriaCiviles = impostoresVivos === 0;

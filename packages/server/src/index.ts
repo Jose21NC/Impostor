@@ -2,6 +2,7 @@ import express from 'express';
 import http from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
+import crypto from 'node:crypto';
 
 import {
   GameState,
@@ -49,6 +50,8 @@ interface RoomMeta {
   // Discussion timer and next step control
   discussionTimeout?: NodeJS.Timeout | null;
   discussionNext?: 'VOTING' | 'IN_GAME' | null;
+  // Rate limit: última vez que un jugador envió palabra
+  lastSubmitAt?: Map<PlayerID, number>;
 }
 
 const roomMeta = new Map<RoomID, RoomMeta>();
@@ -79,7 +82,7 @@ io.on('connection', (socket) => {
       impostorId: null,
       ownerId: playerId,
       // default settings
-  settings: { impostorCount: 1, turnTimeSeconds: 20, voteTimeSeconds: 30, discussionTimeSeconds: 20, hiddenImpostor: false, hideCategory: false } as any,
+  settings: { impostorCount: 1, turnTimeSeconds: 60, voteTimeSeconds: 60, discussionTimeSeconds: 60, hiddenImpostor: false, hideCategory: false } as any,
       phase: 'LOBBY',
       roundNumber: 0,
       createdAt: Date.now(),
@@ -130,9 +133,13 @@ io.on('connection', (socket) => {
       socket.emit('ERROR', 'TOO_MANY_IMPOSTORS');
       return;
     }
-    // Choose impostor(s) randomly
-  const shuffled = state.players.map((p: Player) => p.id).sort(() => Math.random() - 0.5);
-    const chosen = shuffled.slice(0, impostorCount);
+    // Choose impostor(s) randomly (crypto-grade shuffle for mejor aleatoriedad)
+    const ids = state.players.map((p: Player) => p.id);
+    for (let i = ids.length - 1; i > 0; i--) {
+      const j = crypto.randomInt(0, i + 1);
+      [ids[i], ids[j]] = [ids[j], ids[i]];
+    }
+    const chosen = ids.slice(0, impostorCount);
     state.impostorIds = chosen;
     state.impostorId = chosen[0] ?? null;
 
@@ -226,13 +233,21 @@ io.on('connection', (socket) => {
     const me = state.players.find((p) => p.socketId === socket.id);
     const myId = me?.id;
     if (!myId) return socket.emit('ERROR', 'NOT_ALLOWED');
+    // rate limit básico y validación
+    const now = Date.now();
+    if (!meta.lastSubmitAt) meta.lastSubmitAt = new Map();
+    const last = meta.lastSubmitAt.get(myId) ?? 0;
+    if (now - last < 700) return socket.emit('ERROR', 'RATE_LIMIT');
+    const w = (word ?? '').trim();
+    if (w.length < 1 || w.length > 64) return socket.emit('ERROR', 'INVALID_WORD');
     // validate it's player's turn
     const current = meta.turnOrder[meta.currentTurnIndex];
     if (myId !== current) return socket.emit('ERROR', 'NOT_YOUR_TURN');
     // record word
-    meta.words.push({ playerId: myId, word });
+  meta.words.push({ playerId: myId, word: w });
     meta.submittedThisRound.add(myId);
-    io.to(roomId).emit('WORD_SUBMITTED', myId, word);
+  meta.lastSubmitAt.set(myId, now);
+  io.to(roomId).emit('WORD_SUBMITTED', myId, w);
 
     // advance to next alive player
     let nextIndex = meta.currentTurnIndex;
@@ -493,17 +508,35 @@ io.on('connection', (socket) => {
     io.to(roomId).emit('GAME_STATE', state);
   });
 
+  // Reasociar jugador desconectado
+  (socket as any).on('REJOIN', (roomId: RoomID, playerId: PlayerID) => {
+    const st = rooms.get(roomId);
+    if (!st) return socket.emit('ERROR', 'ROOM_NOT_FOUND');
+    const player = st.players.find((p: Player) => p.id === playerId);
+    if (!player) return socket.emit('ERROR', 'PLAYER_NOT_FOUND');
+    // Unir socket a room y reasignar socketId
+    player.socketId = socket.id;
+    socket.join(roomId);
+    rooms.set(roomId, st);
+    // Notificar a todos el nuevo estado y al rejoined darle el JOINED_ROOM
+    socket.emit('JOINED_ROOM', roomId, st);
+    io.to(roomId).emit('GAME_STATE', st);
+  });
+
   socket.on('disconnect', () => {
-    // remove player from any rooms
-    for (const [roomId, state] of rooms.entries()) {
-      const idx = state.players.findIndex((p: Player) => p.socketId === socket.id);
-      if (idx !== -1) {
-        state.players.splice(idx, 1);
-        // if room empty, delete
-        if (state.players.length === 0) rooms.delete(roomId);
-        else rooms.set(roomId, state);
-        io.to(roomId).emit('GAME_STATE', state);
+    for (const [roomId, st] of rooms.entries()) {
+      const player = st.players.find((p: Player) => p.socketId === socket.id);
+      if (!player) continue;
+      // No eliminar jugadores ni salas por desconexión; solo limpiar socketId
+      player.socketId = undefined;
+      // Reasignar dueño si corresponde para permitir continuar
+      if (st.ownerId === player.id) {
+        const replacement = st.players.find(p => p.socketId); // primer conectado
+        if (replacement) st.ownerId = replacement.id;
+        else if (st.players.length > 0) st.ownerId = st.players[0].id; // fallback
       }
+      rooms.set(roomId, st);
+      io.to(roomId).emit('GAME_STATE', st);
     }
   });
 

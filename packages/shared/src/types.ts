@@ -83,6 +83,8 @@ export interface ClientToServerEvents {
   // Reiniciar la sala al estado de lobby manteniendo jugadores (post-partida)
   RESET_LOBBY: (roomId: RoomID) => void;
   UPDATE_SETTINGS: (roomId: RoomID, settings: { impostorCount?: number; turnTimeSeconds?: number; voteTimeSeconds?: number; discussionTimeSeconds?: number; category?: string; categories?: string[]; hiddenImpostor?: boolean; hideCategory?: boolean }) => void;
+  // Reasociar un jugador desconectado a su playerId en una sala existente
+  REJOIN: (roomId: RoomID, playerId: PlayerID) => void;
   // Owner can kick a player before the game starts
   KICK_PLAYER: (roomId: RoomID, playerId: PlayerID) => void;
   ASK_QUESTION: (roomId: RoomID, text: string) => void;
